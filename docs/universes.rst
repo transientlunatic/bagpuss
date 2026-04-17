@@ -80,5 +80,4 @@ the requested number of galaxies.
 API reference
 -------------
 
-.. autoapi-members::
-   :modules: bagpuss.universe
+See :doc:`autoapi/bagpuss/universe/index` for the full API reference.

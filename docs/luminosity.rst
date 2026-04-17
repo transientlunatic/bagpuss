@@ -77,5 +77,4 @@ References
 API reference
 -------------
 
-.. autoapi-members::
-   :modules: bagpuss.luminosity
+See :doc:`autoapi/bagpuss/luminosity/index` for the full API reference.

@@ -8,12 +8,11 @@ gravitational-wave catalogues for testing cosmological inference pipelines.
    :maxdepth: 2
    :caption: Contents
 
-    universes
-    luminosity
-    galaxies
-    plotting
-
-    autoapi/index
+   universes
+   luminosity
+   galaxies
+   plotting
+   autoapi/index
 
 Pipeline stages
 ---------------

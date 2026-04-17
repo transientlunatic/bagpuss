@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync
-      - run: python -m unittest discover -s tests
+      - run: uv run python -m unittest discover -s tests
 
   lint:
     name: Lint & format

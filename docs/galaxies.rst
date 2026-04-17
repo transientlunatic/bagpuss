@@ -34,5 +34,4 @@ constructed directly.  See :doc:`universes` for the full workflow.
 API reference
 -------------
 
-.. autoapi-members::
-   :modules: bagpuss.galaxies
+See :doc:`autoapi/bagpuss/galaxies/index` for the full API reference.
