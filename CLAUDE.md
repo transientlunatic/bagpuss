@@ -39,6 +39,7 @@ Bagpuss runs a seven-stage simulation pipeline:
 
 ## Code conventions
 
+- test-driven development is used where possible, and all new code should be accompanied by tests
 - Python 3.x; type annotations are expected on all public functions and classes
 - Ruff is the primary linter and formatter (`ruff check` + `ruff format`); configuration lives in `pyproject.toml`
   - Ruff implements the rules of flake8 and is a black-compatible formatter — run ruff rather than black or flake8 directly
