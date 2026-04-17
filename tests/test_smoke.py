@@ -38,6 +38,21 @@ class TestImports(unittest.TestCase):
         """bagpuss.inference imports."""
         import bagpuss.inference  # noqa: F401
 
+    def test_luminosity_imports(self) -> None:
+        """bagpuss.luminosity imports."""
+        import bagpuss.luminosity  # noqa: F401
+
+    def test_plotting_imports(self) -> None:
+        """bagpuss.plotting imports."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import bagpuss.plotting  # noqa: F401
+
+    def test_cli_imports(self) -> None:
+        """bagpuss.cli imports."""
+        import bagpuss.cli  # noqa: F401
+
     def test_version(self) -> None:
         """Package exposes a __version__ string."""
         import bagpuss
