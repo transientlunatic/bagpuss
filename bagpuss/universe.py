@@ -15,7 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import numpy as np
-from astropy.cosmology import Cosmology
+from astropy.cosmology import FLRW
 
 from bagpuss.galaxies import GalaxySet
 
@@ -44,7 +44,7 @@ class Structure(ABC):
     def sample_redshifts(
         self,
         n: int,
-        cosmology: Cosmology,
+        cosmology: FLRW,
         rng: np.random.Generator | None = None,
     ) -> np.ndarray:
         """Draw redshifts for a set of galaxies.
@@ -53,7 +53,7 @@ class Structure(ABC):
         ----------
         n : int
             Number of galaxies to sample.
-        cosmology : astropy.cosmology.Cosmology
+        cosmology : astropy.cosmology.FLRW
             Background cosmology used to compute comoving volumes or
             distances as required by the model.
         rng : numpy.random.Generator or None, optional
@@ -113,7 +113,7 @@ class Universe:
 
     Parameters
     ----------
-    cosmology : astropy.cosmology.Cosmology
+    cosmology : astropy.cosmology.FLRW
         Background cosmological model (e.g. ``astropy.cosmology.Planck18``).
     structure : Structure
         Large-scale structure model that determines how galaxy redshifts
@@ -134,7 +134,7 @@ class Universe:
 
     def __init__(
         self,
-        cosmology: Cosmology,
+        cosmology: FLRW,
         structure: Structure,
         luminosity: LuminosityModel,
     ) -> None:
@@ -217,7 +217,7 @@ class PointProcess(Structure):
     def sample_redshifts(
         self,
         n: int,
-        cosmology: Cosmology,
+        cosmology: FLRW,
         rng: np.random.Generator | None = None,
     ) -> np.ndarray:
         """Draw redshifts uniformly distributed in comoving volume.
@@ -226,7 +226,7 @@ class PointProcess(Structure):
         ----------
         n : int
             Number of redshifts to sample.
-        cosmology : astropy.cosmology.Cosmology
+        cosmology : astropy.cosmology.FLRW
             Background cosmology used to compute :math:`V_C(z)`.
         rng : numpy.random.Generator or None, optional
             Random number generator.  If *None*, ``numpy.random.default_rng()``

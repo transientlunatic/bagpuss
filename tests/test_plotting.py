@@ -8,6 +8,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import matplotlib.figure  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -37,7 +38,7 @@ class TestPlotUniverseHeatmap(unittest.TestCase):
     def test_returns_figure(self) -> None:
         """Return value is a matplotlib Figure."""
         fig = plot_universe_heatmap(self.galaxies)
-        self.assertIsInstance(fig, plt.Figure)
+        self.assertIsInstance(fig, matplotlib.figure.Figure)
 
     def test_figure_has_two_axes(self) -> None:
         """Figure contains two axes: main plot and colorbar."""
@@ -67,7 +68,7 @@ class TestPlotUniverseHeatmap(unittest.TestCase):
     def test_custom_bins(self) -> None:
         """Custom bin count produces a valid figure without error."""
         fig = plot_universe_heatmap(self.galaxies, bins=10)
-        self.assertIsInstance(fig, plt.Figure)
+        self.assertIsInstance(fig, matplotlib.figure.Figure)
 
     def test_empty_galaxies_raises(self) -> None:
         """Empty GalaxySet raises ValueError."""
@@ -82,9 +83,9 @@ class TestPlotUniverseHeatmap(unittest.TestCase):
             luminosities=np.array([1e10]),
         )
         fig = plot_universe_heatmap(single, bins=1)
-        self.assertIsInstance(fig, plt.Figure)
+        self.assertIsInstance(fig, matplotlib.figure.Figure)
 
     def test_custom_colormap(self) -> None:
         """Custom colormap name is accepted without error."""
         fig = plot_universe_heatmap(self.galaxies, colormap="plasma")
-        self.assertIsInstance(fig, plt.Figure)
+        self.assertIsInstance(fig, matplotlib.figure.Figure)
