@@ -10,6 +10,7 @@ extensions = [
     "autoapi.extension",
     "sphinx.ext.intersphinx",
     "sphinx.ext.napoleon",
+    "matplotlib.sphinxext.plot_directive",
 ]
 
 # sphinx-autoapi: generate API docs from source without importing the package

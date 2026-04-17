@@ -11,6 +11,7 @@ gravitational-wave catalogues for testing cosmological inference pipelines.
     universes
     luminosity
     galaxies
+    plotting
 
     autoapi/index
 
