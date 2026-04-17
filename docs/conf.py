@@ -32,5 +32,5 @@ intersphinx_mapping = {
     "astropy": ("https://docs.astropy.org/en/stable/", None),
 }
 
-html_theme = "furo"
+html_theme = "kentigern"
 html_title = f"bagpuss {version}"
