@@ -243,7 +243,7 @@ class PointProcess(Structure):
 
         z_grid = np.linspace(0.0, self.z_max, self._GRID_SIZE)
         # comoving_volume returns a Quantity; extract the numerical values
-        v_grid = cosmology.comoving_volume(z_grid).value
+        v_grid = cosmology.comoving_volume(z_grid).value  # pyright: ignore[reportAttributeAccessIssue]
 
         u = rng.uniform(0.0, v_grid[-1], size=n)
         return np.interp(u, v_grid, z_grid)
