@@ -21,6 +21,8 @@ def _make_galaxies(n: int = 200, seed: int = 0) -> GalaxySet:
     return GalaxySet(
         redshifts=rng.uniform(0.0, 1.0, n),
         luminosities=10.0 ** rng.uniform(8.0, 12.0, n),
+        ra=rng.uniform(0.0, 2 * np.pi, n),
+        dec=np.arcsin(rng.uniform(-1.0, 1.0, n)),
     )
 
 
@@ -72,7 +74,12 @@ class TestPlotUniverseHeatmap(unittest.TestCase):
 
     def test_empty_galaxies_raises(self) -> None:
         """Empty GalaxySet raises ValueError."""
-        empty = GalaxySet(redshifts=np.array([]), luminosities=np.array([]))
+        empty = GalaxySet(
+            redshifts=np.array([]),
+            luminosities=np.array([]),
+            ra=np.array([]),
+            dec=np.array([]),
+        )
         with self.assertRaises(ValueError):
             plot_universe_heatmap(empty)
 
@@ -81,6 +88,8 @@ class TestPlotUniverseHeatmap(unittest.TestCase):
         single = GalaxySet(
             redshifts=np.array([0.5]),
             luminosities=np.array([1e10]),
+            ra=np.array([1.0]),
+            dec=np.array([0.0]),
         )
         fig = plot_universe_heatmap(single, bins=1)
         self.assertIsInstance(fig, matplotlib.figure.Figure)

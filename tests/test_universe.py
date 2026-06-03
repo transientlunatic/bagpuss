@@ -96,6 +96,43 @@ class TestPointProcess(unittest.TestCase):
         z = pp.sample_redshifts(10, Planck18, rng=None)
         self.assertEqual(z.shape, (10,))
 
+    def test_sample_positions_shape(self) -> None:
+        """sample_positions returns two arrays of the requested length."""
+        pp = PointProcess(z_max=1.0)
+        rng = np.random.default_rng(0)
+        ra, dec = pp.sample_positions(200, rng)
+        self.assertEqual(ra.shape, (200,))
+        self.assertEqual(dec.shape, (200,))
+
+    def test_sample_positions_ra_bounds(self) -> None:
+        """All RA values lie in [0, 2π)."""
+        pp = PointProcess(z_max=1.0)
+        ra, _ = pp.sample_positions(2000, np.random.default_rng(1))
+        self.assertGreaterEqual(float(ra.min()), 0.0)
+        self.assertLess(float(ra.max()), 2.0 * np.pi)
+
+    def test_sample_positions_dec_bounds(self) -> None:
+        """All Dec values lie in [-π/2, π/2]."""
+        pp = PointProcess(z_max=1.0)
+        _, dec = pp.sample_positions(2000, np.random.default_rng(2))
+        self.assertGreaterEqual(float(dec.min()), -np.pi / 2.0)
+        self.assertLessEqual(float(dec.max()), np.pi / 2.0)
+
+    def test_sample_positions_reproducible(self) -> None:
+        """Same RNG seed produces identical positions."""
+        pp = PointProcess(z_max=1.0)
+        ra1, dec1 = pp.sample_positions(50, np.random.default_rng(9))
+        ra2, dec2 = pp.sample_positions(50, np.random.default_rng(9))
+        np.testing.assert_array_equal(ra1, ra2)
+        np.testing.assert_array_equal(dec1, dec2)
+
+    def test_sample_positions_default_rng(self) -> None:
+        """sample_positions works when rng=None."""
+        pp = PointProcess(z_max=1.0)
+        ra, dec = pp.sample_positions(10, rng=None)
+        self.assertEqual(ra.shape, (10,))
+        self.assertEqual(dec.shape, (10,))
+
 
 # ---------------------------------------------------------------------------
 # Universe
@@ -135,6 +172,32 @@ class TestUniverse(unittest.TestCase):
         u = self._make_universe()
         result = u.sample(50, rng=np.random.default_rng(0))
         self.assertEqual(result.luminosities.shape, (50,))
+
+    def test_sample_ra_shape(self) -> None:
+        """The ra array has shape (n,)."""
+        u = self._make_universe()
+        result = u.sample(50, rng=np.random.default_rng(0))
+        self.assertEqual(result.ra.shape, (50,))
+
+    def test_sample_dec_shape(self) -> None:
+        """The dec array has shape (n,)."""
+        u = self._make_universe()
+        result = u.sample(50, rng=np.random.default_rng(0))
+        self.assertEqual(result.dec.shape, (50,))
+
+    def test_sample_ra_bounds(self) -> None:
+        """All RA values lie in [0, 2π)."""
+        u = self._make_universe()
+        result = u.sample(500, rng=np.random.default_rng(0))
+        self.assertGreaterEqual(float(result.ra.min()), 0.0)
+        self.assertLess(float(result.ra.max()), 2.0 * np.pi)
+
+    def test_sample_dec_bounds(self) -> None:
+        """All Dec values lie in [-π/2, π/2]."""
+        u = self._make_universe()
+        result = u.sample(500, rng=np.random.default_rng(0))
+        self.assertGreaterEqual(float(result.dec.min()), -np.pi / 2.0)
+        self.assertLessEqual(float(result.dec.max()), np.pi / 2.0)
 
     def test_sample_luminosities_from_model(self) -> None:
         """Luminosities reflect the luminosity model output."""

@@ -28,10 +28,15 @@ def _apparent_magnitude(
 def _make_galaxy_set(
     redshifts: list[float],
     luminosities: list[float],
+    ra: list[float] | None = None,
+    dec: list[float] | None = None,
 ) -> GalaxySet:
+    n = len(redshifts)
     return GalaxySet(
         redshifts=np.array(redshifts),
         luminosities=np.array(luminosities),
+        ra=np.zeros(n) if ra is None else np.array(ra),
+        dec=np.zeros(n) if dec is None else np.array(dec),
     )
 
 
@@ -48,6 +53,8 @@ class TestGalaxyCatalogue(unittest.TestCase):
             redshifts=np.array([0.1, 0.2, 0.3]),
             luminosities=np.array([1e10, 2e10, 5e9]),
             apparent_magnitudes=np.array([18.0, 19.5, 20.1]),
+            ra=np.array([0.1, 1.2, 2.3]),
+            dec=np.array([-0.3, 0.0, 0.4]),
         )
 
     def test_stores_redshifts(self) -> None:
@@ -65,6 +72,16 @@ class TestGalaxyCatalogue(unittest.TestCase):
         cat = self._make_catalogue()
         np.testing.assert_array_equal(cat.apparent_magnitudes, [18.0, 19.5, 20.1])
 
+    def test_stores_ra(self) -> None:
+        """RA is stored on the instance."""
+        cat = self._make_catalogue()
+        np.testing.assert_array_equal(cat.ra, [0.1, 1.2, 2.3])
+
+    def test_stores_dec(self) -> None:
+        """Dec is stored on the instance."""
+        cat = self._make_catalogue()
+        np.testing.assert_array_equal(cat.dec, [-0.3, 0.0, 0.4])
+
     def test_len(self) -> None:
         """__len__ returns the number of galaxies."""
         cat = self._make_catalogue()
@@ -76,6 +93,8 @@ class TestGalaxyCatalogue(unittest.TestCase):
             redshifts=np.array([]),
             luminosities=np.array([]),
             apparent_magnitudes=np.array([]),
+            ra=np.array([]),
+            dec=np.array([]),
         )
         self.assertEqual(len(cat), 0)
 
@@ -126,8 +145,6 @@ class TestMagnitudeLimitedSurvey(unittest.TestCase):
 
     def test_bright_galaxy_selected(self) -> None:
         """A very luminous galaxy is selected for a typical m_lim."""
-        # An extremely luminous galaxy (1e15 L_sun) at z=0.1 will have a
-        # very small apparent magnitude and be selected for any sane m_lim.
         survey = MagnitudeLimitedSurvey(m_lim=25.0)
         galaxies = _make_galaxy_set([0.1], [1e15])
         result = survey.apply(galaxies, Planck18)
@@ -135,7 +152,6 @@ class TestMagnitudeLimitedSurvey(unittest.TestCase):
 
     def test_faint_galaxy_rejected(self) -> None:
         """A very faint galaxy is rejected when m_lim is bright."""
-        # An extremely faint galaxy (1e-5 L_sun) at z=0.5 will be very faint.
         survey = MagnitudeLimitedSurvey(m_lim=10.0)
         galaxies = _make_galaxy_set([0.5], [1e-5])
         result = survey.apply(galaxies, Planck18)
@@ -152,10 +168,8 @@ class TestMagnitudeLimitedSurvey(unittest.TestCase):
 
     def test_mixed_selection(self) -> None:
         """Only galaxies brighter than m_lim are returned."""
-        # z=0.1, L=1e12 → bright; z=0.5, L=1e6 → faint
         m_bright = _apparent_magnitude(0.1, 1e12)
         m_faint = _apparent_magnitude(0.5, 1e6)
-        # Set m_lim between the two
         m_lim = 0.5 * (m_bright + m_faint)
         survey = MagnitudeLimitedSurvey(m_lim=m_lim)
         galaxies = _make_galaxy_set([0.1, 0.5], [1e12, 1e6])
@@ -211,16 +225,42 @@ class TestMagnitudeLimitedSurvey(unittest.TestCase):
         result = survey.apply(galaxies, Planck18)
         np.testing.assert_array_equal(result.luminosities, lums)
 
+    def test_ra_propagated(self) -> None:
+        """RA values are propagated from GalaxySet to selected catalogue entries."""
+        survey = MagnitudeLimitedSurvey(m_lim=100.0)
+        ra_vals = [0.5, 1.0, 2.0]
+        galaxies = _make_galaxy_set([0.1, 0.2, 0.3], [1e10, 1e10, 1e10], ra=ra_vals)
+        result = survey.apply(galaxies, Planck18)
+        np.testing.assert_array_equal(result.ra, ra_vals)
+
+    def test_dec_propagated(self) -> None:
+        """Dec values are propagated from GalaxySet to selected catalogue entries."""
+        survey = MagnitudeLimitedSurvey(m_lim=100.0)
+        dec_vals = [-0.3, 0.0, 0.5]
+        galaxies = _make_galaxy_set([0.1, 0.2, 0.3], [1e10, 1e10, 1e10], dec=dec_vals)
+        result = survey.apply(galaxies, Planck18)
+        np.testing.assert_array_equal(result.dec, dec_vals)
+
+    def test_ra_dec_filtered_consistently(self) -> None:
+        """RA/Dec in catalogue correspond to the selected rows only."""
+        m_bright = _apparent_magnitude(0.1, 1e12)
+        m_faint = _apparent_magnitude(0.5, 1e6)
+        m_lim = 0.5 * (m_bright + m_faint)
+        survey = MagnitudeLimitedSurvey(m_lim=m_lim)
+        galaxies = _make_galaxy_set(
+            [0.1, 0.5], [1e12, 1e6], ra=[0.1, 5.0], dec=[0.2, -0.9]
+        )
+        result = survey.apply(galaxies, Planck18)
+        np.testing.assert_allclose(result.ra, [0.1])
+        np.testing.assert_allclose(result.dec, [0.2])
+
     def test_catalogue_fields_consistent_length(self) -> None:
         """All fields in the output catalogue have the same length."""
         survey = MagnitudeLimitedSurvey(m_lim=20.0)
         galaxies = _make_galaxy_set([0.1, 0.2, 0.5], [1e12, 1e10, 1e6])
         result = survey.apply(galaxies, Planck18)
-        self.assertEqual(
-            result.redshifts.shape,
-            result.luminosities.shape,
-        )
-        self.assertEqual(
-            result.redshifts.shape,
-            result.apparent_magnitudes.shape,
-        )
+        shape = result.redshifts.shape
+        self.assertEqual(result.luminosities.shape, shape)
+        self.assertEqual(result.apparent_magnitudes.shape, shape)
+        self.assertEqual(result.ra.shape, shape)
+        self.assertEqual(result.dec.shape, shape)

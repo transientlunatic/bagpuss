@@ -12,6 +12,8 @@ gravitational-wave catalogues for testing cosmological inference pipelines.
    luminosity
    galaxies
    catalogue
+   population
+   injection
    plotting
    autoapi/index
 

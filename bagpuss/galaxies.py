@@ -24,6 +24,10 @@ class GalaxySet:
         Redshifts of each galaxy, shape ``(n,)``.
     luminosities : numpy.ndarray
         Luminosities of each galaxy in solar luminosities, shape ``(n,)``.
+    ra : numpy.ndarray
+        Right ascensions in radians, in the range ``[0, 2π)``, shape ``(n,)``.
+    dec : numpy.ndarray
+        Declinations in radians, in the range ``[-π/2, π/2]``, shape ``(n,)``.
 
     Examples
     --------
@@ -33,6 +37,8 @@ class GalaxySet:
     >>> gs = GalaxySet(
     ...     redshifts=np.array([0.1, 0.3, 0.5]),
     ...     luminosities=np.array([1e10, 2e10, 5e9]),
+    ...     ra=np.array([0.5, 1.2, 3.0]),
+    ...     dec=np.array([-0.3, 0.1, 0.8]),
     ... )
     >>> len(gs)
     3
@@ -40,6 +46,8 @@ class GalaxySet:
 
     redshifts: np.ndarray
     luminosities: np.ndarray
+    ra: np.ndarray
+    dec: np.ndarray
 
     def __len__(self) -> int:
         """Return the number of galaxies in the set."""

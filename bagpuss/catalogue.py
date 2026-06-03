@@ -32,6 +32,10 @@ class GalaxyCatalogue:
         Luminosities of selected galaxies in solar luminosities, shape ``(n,)``.
     apparent_magnitudes : numpy.ndarray
         Apparent magnitudes of selected galaxies in the survey band, shape ``(n,)``.
+    ra : numpy.ndarray
+        Right ascensions in radians, shape ``(n,)``.
+    dec : numpy.ndarray
+        Declinations in radians, shape ``(n,)``.
 
     Examples
     --------
@@ -40,6 +44,8 @@ class GalaxyCatalogue:
     ...     redshifts=np.array([0.1, 0.2]),
     ...     luminosities=np.array([1e10, 2e10]),
     ...     apparent_magnitudes=np.array([18.5, 19.2]),
+    ...     ra=np.array([0.5, 2.1]),
+    ...     dec=np.array([-0.3, 0.4]),
     ... )
     >>> len(cat)
     2
@@ -48,6 +54,8 @@ class GalaxyCatalogue:
     redshifts: np.ndarray
     luminosities: np.ndarray
     apparent_magnitudes: np.ndarray
+    ra: np.ndarray
+    dec: np.ndarray
 
     def __len__(self) -> int:
         """Return the number of galaxies in the catalogue."""
@@ -145,6 +153,8 @@ class MagnitudeLimitedSurvey(SelectionFunction):
                 redshifts=empty,
                 luminosities=empty,
                 apparent_magnitudes=empty,
+                ra=empty,
+                dec=empty,
             )
 
         d_L_pc = cosmology.luminosity_distance(galaxies.redshifts).to("pc").value
@@ -157,4 +167,6 @@ class MagnitudeLimitedSurvey(SelectionFunction):
             redshifts=galaxies.redshifts[mask],
             luminosities=galaxies.luminosities[mask],
             apparent_magnitudes=apparent_magnitudes[mask],
+            ra=galaxies.ra[mask],
+            dec=galaxies.dec[mask],
         )
