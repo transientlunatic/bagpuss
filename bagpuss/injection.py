@@ -1,8 +1,344 @@
-"""Gravitational-wave injection — Stage 5 of the bagpuss pipeline.
+"""GW injection set — Stage 5 of the bagpuss pipeline.
 
-Injects gravitational-wave signals from the BBH population into noise
-(real or simulated) and determines which events are above threshold for
-a given detector network.
+Assigns host galaxies from a :class:`~bagpuss.catalogue.GalaxyCatalogue` to
+BBH events drawn from a :class:`~bagpuss.population.PopulationModel`, draws
+the remaining extrinsic parameters, applies a
+:class:`Detectable` filter, and produces an :class:`InjectionSet` that can
+be written to HDF5 for use by downstream parameter-estimation and inference
+tools (bilby, pycbc, etc.).
 """
 
-__all__: list[str] = []
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+
+import h5py
+import numpy as np
+from astropy.cosmology import FLRW
+
+from bagpuss.catalogue import GalaxyCatalogue
+from bagpuss.population import PopulationModel
+
+__all__: list[str] = [
+    "InjectionSet",
+    "Detectable",
+    "DistanceThreshold",
+    "create_injection_set",
+]
+
+#: Default GPS start of O3a (2019-04-01 15:00:00 UTC).
+_GPS_O3_START: float = 1_238_166_018.0
+#: Default GPS end of O3b (2020-03-27 17:00:00 UTC).
+_GPS_O3_END: float = 1_269_363_618.0
+
+_INJECTION_FIELDS: tuple[str, ...] = (
+    "m1_source",
+    "m2_source",
+    "a1",
+    "a2",
+    "cos_tilt1",
+    "cos_tilt2",
+    "phi12",
+    "phi_jl",
+    "theta_jn",
+    "ra",
+    "dec",
+    "psi",
+    "geocent_time",
+    "redshift",
+    "luminosity_distance",
+    "host_galaxy_index",
+)
+
+
+# ---------------------------------------------------------------------------
+# Data container
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InjectionSet:
+    r"""A set of simulated GW injections with full extrinsic parameters.
+
+    Each row corresponds to one BBH event assigned to a host galaxy drawn
+    from a :class:`~bagpuss.catalogue.GalaxyCatalogue`.
+
+    Parameters
+    ----------
+    m1_source, m2_source : numpy.ndarray
+        Source-frame component masses in :math:`M_\odot`, shape ``(n,)``.
+    a1, a2 : numpy.ndarray
+        Spin magnitudes, shape ``(n,)``.
+    cos_tilt1, cos_tilt2 : numpy.ndarray
+        Cosines of spin tilt angles, shape ``(n,)``.
+    phi12, phi_jl : numpy.ndarray
+        Azimuthal spin angles in radians, shape ``(n,)``.
+    theta_jn : numpy.ndarray
+        Inclination angle (angle between total angular momentum and
+        line-of-sight) in radians, shape ``(n,)``.  Values in ``[0, π]``.
+    ra : numpy.ndarray
+        Right ascension of the host galaxy in radians, shape ``(n,)``.
+    dec : numpy.ndarray
+        Declination of the host galaxy in radians, shape ``(n,)``.
+    psi : numpy.ndarray
+        Gravitational-wave polarisation angle in radians, shape ``(n,)``.
+        Values in ``[0, π)``.
+    geocent_time : numpy.ndarray
+        Geocentric GPS merger time in seconds, shape ``(n,)``.
+    redshift : numpy.ndarray
+        Redshift of the host galaxy, shape ``(n,)``.
+    luminosity_distance : numpy.ndarray
+        Luminosity distance to the host galaxy in Mpc, shape ``(n,)``.
+    host_galaxy_index : numpy.ndarray
+        Integer index into the :class:`~bagpuss.catalogue.GalaxyCatalogue`
+        used to generate these injections, shape ``(n,)``.
+    """
+
+    m1_source: np.ndarray
+    m2_source: np.ndarray
+    a1: np.ndarray
+    a2: np.ndarray
+    cos_tilt1: np.ndarray
+    cos_tilt2: np.ndarray
+    phi12: np.ndarray
+    phi_jl: np.ndarray
+    theta_jn: np.ndarray
+    ra: np.ndarray
+    dec: np.ndarray
+    psi: np.ndarray
+    geocent_time: np.ndarray
+    redshift: np.ndarray
+    luminosity_distance: np.ndarray
+    host_galaxy_index: np.ndarray
+
+    def __len__(self) -> int:
+        """Return the number of injections."""
+        return int(self.m1_source.shape[0])
+
+    def to_hdf5(self, path: str | Path) -> None:
+        """Write the injection set to an HDF5 file.
+
+        Each parameter is stored as a dataset inside a top-level
+        ``/injections`` group.  The file is compatible with bilby's
+        ``InjectionSet`` reader.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Output file path.  An existing file is overwritten.
+        """
+        with h5py.File(path, "w") as f:
+            grp = f.create_group("injections")
+            for field in _INJECTION_FIELDS:
+                grp.create_dataset(field, data=getattr(self, field))
+
+    @classmethod
+    def from_hdf5(cls, path: str | Path) -> InjectionSet:
+        """Load an injection set from an HDF5 file written by :meth:`to_hdf5`.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Path to an HDF5 file containing an ``/injections`` group.
+
+        Returns
+        -------
+        InjectionSet
+        """
+        with h5py.File(path, "r") as f:
+            grp = f["injections"]
+            data = {field: grp[field][()] for field in _INJECTION_FIELDS}
+        return cls(**data)
+
+
+# ---------------------------------------------------------------------------
+# Detectability models
+# ---------------------------------------------------------------------------
+
+
+class Detectable(ABC):
+    """Abstract base class for GW detectability models.
+
+    A detectability model is a callable that maps a parameter dictionary to
+    an array of detection probabilities in ``[0, 1]``.  Events are kept if
+    ``rng.uniform() < p_det``.
+
+    Subclasses must implement :meth:`__call__`.
+    """
+
+    @abstractmethod
+    def __call__(self, params: dict[str, np.ndarray]) -> np.ndarray:
+        """Return per-event detection probabilities.
+
+        Parameters
+        ----------
+        params : dict
+            Dictionary containing at least ``luminosity_distance`` (in Mpc)
+            and any other fields required by the specific model.
+
+        Returns
+        -------
+        numpy.ndarray
+            Detection probabilities, shape ``(n,)``, values in ``[0, 1]``.
+        """
+
+
+class DistanceThreshold(Detectable):
+    """Step-function detectability: all events within ``d_max`` are detected.
+
+    This is the simplest possible detectability model — a hard cut on
+    luminosity distance.  It is useful for quick sanity checks and as a
+    baseline for comparison with more realistic models.
+
+    Parameters
+    ----------
+    d_max : float
+        Maximum luminosity distance in Mpc.  Events with
+        ``luminosity_distance <= d_max`` are detected with probability 1;
+        all others are not detected.
+
+    Raises
+    ------
+    ValueError
+        If ``d_max <= 0``.
+    """
+
+    def __init__(self, d_max: float) -> None:
+        if d_max <= 0.0:
+            raise ValueError(f"d_max must be positive, got {d_max!r}")
+        self.d_max = d_max
+
+    def __call__(self, params: dict[str, np.ndarray]) -> np.ndarray:
+        """Return 1.0 for events within d_max, 0.0 for those beyond.
+
+        Parameters
+        ----------
+        params : dict
+            Must contain ``luminosity_distance`` in Mpc.
+
+        Returns
+        -------
+        numpy.ndarray
+            Detection probabilities, shape ``(n,)``.
+        """
+        return (params["luminosity_distance"] <= self.d_max).astype(float)
+
+
+# ---------------------------------------------------------------------------
+# Factory function
+# ---------------------------------------------------------------------------
+
+
+def create_injection_set(
+    catalogue: GalaxyCatalogue,
+    population: PopulationModel,
+    cosmology: FLRW,
+    n_draw: int,
+    detectable: Detectable | None = None,
+    rng: np.random.Generator | None = None,
+    t_start: float = _GPS_O3_START,
+    t_end: float = _GPS_O3_END,
+) -> InjectionSet:
+    """Create a simulated GW injection set from a galaxy catalogue.
+
+    For each of the ``n_draw`` events:
+
+    1. A host galaxy is drawn uniformly at random from ``catalogue``.
+    2. Intrinsic BBH parameters (masses, spins) are drawn from ``population``.
+    3. Sky position and redshift are inherited from the host galaxy; the
+       luminosity distance is computed from the redshift via ``cosmology``.
+    4. Extrinsic parameters (inclination, polarisation, merger time) are
+       drawn from their default priors.
+    5. If ``detectable`` is provided, events are kept with probability
+       ``detectable(params)``; otherwise all events are kept.
+
+    Parameters
+    ----------
+    catalogue : GalaxyCatalogue
+        Observed galaxy catalogue providing host galaxy positions and
+        redshifts.
+    population : PopulationModel
+        BBH population model used to draw intrinsic parameters.
+    cosmology : astropy.cosmology.FLRW
+        Background cosmology used to convert redshifts to luminosity distances.
+    n_draw : int
+        Number of BBH events to draw from the population before applying
+        the detectability filter.
+    detectable : Detectable or None, optional
+        Detectability model.  If *None*, all ``n_draw`` events are kept.
+    rng : numpy.random.Generator or None, optional
+        Random number generator.  If *None*, ``numpy.random.default_rng()``
+        is used.
+    t_start : float, optional
+        Start of the observation window in GPS seconds.  Defaults to the
+        O3 start (2019-04-01).
+    t_end : float, optional
+        End of the observation window in GPS seconds.  Defaults to the O3
+        end (2020-03-27).
+
+    Returns
+    -------
+    InjectionSet
+        The (filtered) set of simulated GW injections.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n_cat = len(catalogue)
+
+    # 1. Draw intrinsic parameters from the population model
+    bbh = population.sample(n_draw, rng)
+
+    # 2. Assign host galaxies uniformly at random
+    host_idx = rng.integers(0, n_cat, size=n_draw)
+
+    # 3. Inherit sky position and redshift from host; compute d_L
+    redshift = catalogue.redshifts[host_idx]
+    ra = catalogue.ra[host_idx]
+    dec = catalogue.dec[host_idx]
+    luminosity_distance = cosmology.luminosity_distance(redshift).to("Mpc").value
+
+    # 4. Draw extrinsic parameters
+    #    theta_jn: uniform in cos(theta_jn) → theta_jn = arccos(Uniform(-1,1))
+    cos_theta_jn = rng.uniform(-1.0, 1.0, size=n_draw)
+    theta_jn = np.arccos(cos_theta_jn)
+    psi = rng.uniform(0.0, np.pi, size=n_draw)
+    geocent_time = rng.uniform(t_start, t_end, size=n_draw)
+
+    # 5. Apply detectability filter
+    params = {
+        "m1_source": bbh.m1_source,
+        "m2_source": bbh.m2_source,
+        "luminosity_distance": luminosity_distance,
+        "redshift": redshift,
+        "ra": ra,
+        "dec": dec,
+        "theta_jn": theta_jn,
+    }
+
+    if detectable is not None:
+        p_det = detectable(params)
+        keep = rng.uniform(0.0, 1.0, size=n_draw) < p_det
+    else:
+        keep = np.ones(n_draw, dtype=bool)
+
+    return InjectionSet(
+        m1_source=bbh.m1_source[keep],
+        m2_source=bbh.m2_source[keep],
+        a1=bbh.a1[keep],
+        a2=bbh.a2[keep],
+        cos_tilt1=bbh.cos_tilt1[keep],
+        cos_tilt2=bbh.cos_tilt2[keep],
+        phi12=bbh.phi12[keep],
+        phi_jl=bbh.phi_jl[keep],
+        theta_jn=theta_jn[keep],
+        ra=ra[keep],
+        dec=dec[keep],
+        psi=psi[keep],
+        geocent_time=geocent_time[keep],
+        redshift=redshift[keep],
+        luminosity_distance=luminosity_distance[keep],
+        host_galaxy_index=host_idx[keep],
+    )

@@ -36,8 +36,10 @@ class Structure(ABC):
     """Abstract base class for galaxy large-scale structure models.
 
     A structure model is responsible for drawing the *spatial* distribution
-    of galaxies — specifically their redshifts — given a background cosmology.
-    Subclasses must implement :meth:`sample_redshifts`.
+    of galaxies — their redshifts and sky positions — given a background
+    cosmology.  Subclasses must implement :meth:`sample_redshifts`.
+    :meth:`sample_positions` has a default isotropic implementation that
+    subclasses may override for anisotropic models.
     """
 
     @abstractmethod
@@ -65,6 +67,40 @@ class Structure(ABC):
         numpy.ndarray
             Array of redshifts with shape ``(n,)``.
         """
+
+    def sample_positions(
+        self,
+        n: int,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Draw isotropic sky positions for a set of galaxies.
+
+        The default implementation draws positions uniformly on the sphere,
+        which is correct for any spatially homogeneous model.  Subclasses
+        may override this for anisotropic large-scale structure models.
+
+        Parameters
+        ----------
+        n : int
+            Number of positions to sample.
+        rng : numpy.random.Generator or None, optional
+            Random number generator.  If *None*, ``numpy.random.default_rng()``
+            is used.
+
+        Returns
+        -------
+        ra : numpy.ndarray
+            Right ascensions in radians, uniformly distributed in
+            ``[0, 2π)``, shape ``(n,)``.
+        dec : numpy.ndarray
+            Declinations in radians, distributed as
+            ``arcsin(Uniform(-1, 1))``, shape ``(n,)``.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+        ra = rng.uniform(0.0, 2.0 * np.pi, size=n)
+        dec = np.arcsin(rng.uniform(-1.0, 1.0, size=n))
+        return ra, dec
 
 
 class LuminosityModel(ABC):
@@ -168,7 +204,8 @@ class Universe:
         """
         redshifts = self.structure.sample_redshifts(n, self.cosmology, rng)
         luminosities = self.luminosity.sample(n, rng)
-        return GalaxySet(redshifts=redshifts, luminosities=luminosities)
+        ra, dec = self.structure.sample_positions(n, rng)
+        return GalaxySet(redshifts=redshifts, luminosities=luminosities, ra=ra, dec=dec)
 
 
 # ---------------------------------------------------------------------------
