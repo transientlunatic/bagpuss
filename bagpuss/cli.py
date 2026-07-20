@@ -326,3 +326,132 @@ def heatmap_cmd(
         plt.show()
 
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# MDC (Mock Data Challenge) pipeline
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def mdc() -> None:
+    """Mock Data Challenge (MDC) generation pipeline.
+
+    One subcommand per stage of the sharded, condor-friendly pipeline in
+    :mod:`bagpuss.mdc.pipeline`. Every subcommand takes ``--config``, a YAML
+    file loaded via :func:`bagpuss.mdc.config.load_config` -- see
+    ``docs/mdc.rst`` for the full config schema and pipeline shape.
+    """
+
+
+_CONFIG_OPTION = click.option(
+    "--config",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="YAML MDCConfig file (see bagpuss.mdc.config.MDCConfig).",
+)
+
+
+@mdc.command("generate-tile")
+@_CONFIG_OPTION
+@click.option("--tile-id", type=int, required=True, help="Sky-tile index to generate.")
+def mdc_generate_tile(config: Path, tile_id: int) -> None:
+    """Generate one galaxy-catalogue sky tile (a Tier-1 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import generate_catalogue_tile
+
+    cfg = load_config(config)
+    catalogue = generate_catalogue_tile(cfg, tile_id)
+    click.echo(f"tile {tile_id}: {len(catalogue)} galaxies written to {cfg.store}")
+
+
+@mdc.command("consolidate")
+@_CONFIG_OPTION
+def mdc_consolidate(config: Path) -> None:
+    """Validate and consolidate all catalogue tiles (the Tier-2 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError, consolidate_catalogue
+
+    cfg = load_config(config)
+    try:
+        report = consolidate_catalogue(cfg)
+    except MDCValidationError as exc:
+        click.echo(f"Catalogue validation FAILED: {exc.report['issues']}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"consolidated {report['n_tiles']} tiles, {report['total_galaxies']} galaxies"
+    )
+
+
+@mdc.command("generate-injections")
+@_CONFIG_OPTION
+@click.option(
+    "--shard-id", type=int, required=True, help="Injection-shard index to generate."
+)
+def mdc_generate_injections(config: Path, shard_id: int) -> None:
+    """Generate one injection shard (a Tier-3 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import generate_injection_shard
+
+    cfg = load_config(config)
+    injections = generate_injection_shard(cfg, shard_id)
+    click.echo(f"shard {shard_id}: {len(injections)} injections written to {cfg.store}")
+
+
+@mdc.command("assemble-injections")
+@_CONFIG_OPTION
+def mdc_assemble_injections(config: Path) -> None:
+    """Validate and consolidate all injection shards (the Tier-4 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError, assemble_injections
+
+    cfg = load_config(config)
+    try:
+        report = assemble_injections(cfg)
+    except MDCValidationError as exc:
+        click.echo(f"Injection validation FAILED: {exc.report['issues']}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"consolidated {report['n_shards']} shards, "
+        f"{report['total_injections']} injections"
+    )
+
+
+@mdc.command("package")
+@_CONFIG_OPTION
+def mdc_package(config: Path) -> None:
+    """Write the run's manifest/provenance (the Tier-5 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import package_manifest
+
+    cfg = load_config(config)
+    manifest = package_manifest(cfg)
+    click.echo(f"wrote manifest for {cfg.store}: {manifest}")
+
+
+@mdc.command("make-dag")
+@_CONFIG_OPTION
+@click.option(
+    "--out-dir",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Directory to write mdc.dag and the per-stage .sub files into.",
+)
+@click.option(
+    "--bagpuss-executable",
+    type=str,
+    required=True,
+    help="Absolute path to the bagpuss entry point on the execute node "
+    "(e.g. a venv's bin/bagpuss).",
+)
+def mdc_make_dag(config: Path, out_dir: Path, bagpuss_executable: str) -> None:
+    """Render the HTCondor DAG and submit files for a run, without submitting."""
+    from bagpuss.mdc.condor import write_dag
+    from bagpuss.mdc.config import load_config
+
+    cfg = load_config(config)
+    dag_path = write_dag(cfg, config, out_dir, bagpuss_executable)
+    click.echo(
+        f"Wrote DAG ({cfg.n_tiles} tiles, {cfg.n_injection_shards} shards) "
+        f"to {dag_path}"
+    )

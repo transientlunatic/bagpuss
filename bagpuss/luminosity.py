@@ -113,6 +113,56 @@ class SchechterLuminosityModel(LuminosityModel):
         self.m_sun = m_sun
         self._model = Schechter1D(phi_star=phi_star, m_star=m_star, alpha=alpha)
 
+        # Precompute the magnitude grid and its CDF once, since phi_star,
+        # m_star, alpha, m_min, and m_max are fixed for the lifetime of the
+        # instance.  Reused by both `sample` and `cdf`.
+        self._m_grid = np.linspace(m_min, m_max, _GRID_SIZE)
+        pdf = self._model(self._m_grid)
+        delta = np.diff(self._m_grid)
+        cdf_grid = np.concatenate(
+            [[0.0], np.cumsum(0.5 * (pdf[:-1] + pdf[1:]) * delta)]
+        )
+        self._number_density: float = float(cdf_grid[-1])
+        self._cdf_grid = cdf_grid / self._number_density
+
+    def number_density(self) -> float:
+        """Return the expected number density of galaxies in Mpc⁻³.
+
+        This is the integral of the Schechter function over the model's
+        magnitude range ``[m_min, m_max]``.  It depends on ``phi_star`` —
+        which must be supplied in physical units (Mpc⁻³ mag⁻¹) for this
+        value to have a meaningful absolute scale.
+
+        Returns
+        -------
+        float
+            Expected galaxy number density in Mpc⁻³.
+        """
+        return self._number_density
+
+    def cdf(self, magnitude: np.ndarray) -> np.ndarray:
+        """Return the cumulative fraction of the population brighter than ``magnitude``.
+
+        Parameters
+        ----------
+        magnitude : numpy.ndarray
+            Absolute magnitudes at which to evaluate the cumulative
+            distribution, shape ``(n,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Fraction of the population with absolute magnitude less than or
+            equal to ``magnitude``, shape ``(n,)``.  Values outside
+            ``[m_min, m_max]`` are clamped to ``0`` or ``1`` respectively.
+        """
+        magnitude = np.asarray(magnitude, dtype=float)
+        return np.asarray(np.interp(magnitude, self._m_grid, self._cdf_grid))
+
+    def _magnitudes_to_luminosities(self, magnitudes: np.ndarray) -> np.ndarray:
+        """Convert absolute magnitudes to solar luminosities."""
+        return 10.0 ** (0.4 * (self.m_sun - magnitudes))
+
     def sample(
         self,
         n: int,
@@ -136,16 +186,6 @@ class SchechterLuminosityModel(LuminosityModel):
         if rng is None:
             rng = np.random.default_rng()
 
-        m_grid = np.linspace(self.m_min, self.m_max, _GRID_SIZE)
-        pdf = self._model(m_grid)
-
-        # Build the CDF via the trapezoidal rule and normalise to [0, 1]
-        delta = np.diff(m_grid)
-        cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[:-1] + pdf[1:]) * delta)])
-        cdf /= cdf[-1]
-
         u = rng.uniform(0.0, 1.0, size=n)
-        magnitudes = np.interp(u, cdf, m_grid)
-
-        # Convert absolute magnitudes to solar luminosities
-        return 10.0 ** (0.4 * (self.m_sun - magnitudes))
+        magnitudes = np.interp(u, self._cdf_grid, self._m_grid)
+        return self._magnitudes_to_luminosities(magnitudes)

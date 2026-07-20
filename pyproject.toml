@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib>=3.8",
     "pyyaml>=6.0",
     "h5py>=3.10",
+    "zarr>=3.2.1",
 ]
 
 [project.scripts]
@@ -66,3 +67,8 @@ ignore_missing_imports = true
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.408",
+]

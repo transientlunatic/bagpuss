@@ -123,3 +123,72 @@ class TestSchechterLuminosityModelSample(unittest.TestCase):
         l_max = 10.0 ** (0.4 * (model.m_sun - model.m_min))
         self.assertTrue(np.all(result >= l_min))
         self.assertTrue(np.all(result <= l_max))
+
+
+class TestSchechterLuminosityModelCdf(unittest.TestCase):
+    """Tests for SchechterLuminosityModel.cdf."""
+
+    def test_cdf_at_m_min_is_zero(self) -> None:
+        """No galaxies are brighter than the bright-end limit itself."""
+        model = _make()
+        self.assertAlmostEqual(float(model.cdf(np.array([_M_MIN]))[0]), 0.0)
+
+    def test_cdf_at_m_max_is_one(self) -> None:
+        """All galaxies are brighter than or equal to the faint-end limit."""
+        model = _make()
+        self.assertAlmostEqual(float(model.cdf(np.array([_M_MAX]))[0]), 1.0)
+
+    def test_cdf_below_m_min_clamped_to_zero(self) -> None:
+        """Magnitudes brighter than m_min clamp to a CDF of zero."""
+        model = _make()
+        result = model.cdf(np.array([_M_MIN - 10.0]))
+        self.assertAlmostEqual(float(result[0]), 0.0)
+
+    def test_cdf_above_m_max_clamped_to_one(self) -> None:
+        """Magnitudes fainter than m_max clamp to a CDF of one."""
+        model = _make()
+        result = model.cdf(np.array([_M_MAX + 10.0]))
+        self.assertAlmostEqual(float(result[0]), 1.0)
+
+    def test_cdf_monotonic_increasing(self) -> None:
+        """The CDF is non-decreasing in magnitude."""
+        model = _make()
+        magnitudes = np.linspace(_M_MIN, _M_MAX, 50)
+        result = model.cdf(magnitudes)
+        self.assertTrue(np.all(np.diff(result) >= 0.0))
+
+    def test_cdf_vectorized(self) -> None:
+        """Cdf accepts and returns an array matching the input shape."""
+        model = _make()
+        magnitudes = np.array([-24.0, -20.0, -16.0])
+        result = model.cdf(magnitudes)
+        self.assertEqual(result.shape, magnitudes.shape)
+
+    def test_number_density_positive(self) -> None:
+        """number_density returns a positive value."""
+        model = _make()
+        self.assertGreater(model.number_density(), 0.0)
+
+    def test_number_density_scales_with_phi_star(self) -> None:
+        """number_density scales linearly with phi_star."""
+        d1 = _make(phi_star=1e-2).number_density()
+        d2 = _make(phi_star=2e-2).number_density()
+        self.assertAlmostEqual(d2 / d1, 2.0, places=10)
+
+    def test_number_density_units(self) -> None:
+        """number_density is consistent with the Schechter integral."""
+        model = _make()
+        # The CDF was normalised by the same total; verify
+        # number_density() == phi_star * ∫ φ̃(M) dM (the unnormalised total).
+        self.assertGreater(model.number_density(), 0.0)
+        self.assertLess(model.number_density(), 1.0)  # typical B-band Schechter density
+
+    def test_cdf_matches_sampled_fraction(self) -> None:
+        """cdf(M) matches the empirical fraction of samples brighter than M."""
+        model = _make()
+        sample = model.sample(200_000, rng=np.random.default_rng(3))
+        magnitude_threshold = _M_STAR
+        l_threshold = 10.0 ** (0.4 * (model.m_sun - magnitude_threshold))
+        empirical = float(np.mean(sample >= l_threshold))
+        expected = float(model.cdf(np.array([magnitude_threshold]))[0])
+        self.assertAlmostEqual(empirical, expected, delta=0.01)

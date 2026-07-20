@@ -8,16 +8,33 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+import zarr
 from astropy.cosmology import FLRW
 
 from bagpuss.galaxies import GalaxySet
+from bagpuss.universe import LuminosityModel, Universe
 
-__all__: list[str] = ["GalaxyCatalogue", "SelectionFunction", "MagnitudeLimitedSurvey"]
+__all__: list[str] = [
+    "GalaxyCatalogue",
+    "SelectionFunction",
+    "MagnitudeLimitedSurvey",
+    "build_catalogue",
+]
 
 #: Absolute magnitude of the Sun (bolometric).
 _M_SUN_BOLOMETRIC: float = 4.83
+
+#: Field names written/read by GalaxyCatalogue.to_zarr / from_zarr.
+_CATALOGUE_FIELDS: tuple[str, ...] = (
+    "redshifts",
+    "luminosities",
+    "apparent_magnitudes",
+    "ra",
+    "dec",
+)
 
 
 @dataclass
@@ -60,6 +77,44 @@ class GalaxyCatalogue:
     def __len__(self) -> int:
         """Return the number of galaxies in the catalogue."""
         return int(self.redshifts.shape[0])
+
+    def to_zarr(self, group: zarr.Group | str | Path) -> None:
+        """Write the catalogue's fields as arrays in a zarr group.
+
+        Each field is stored as a top-level array in *group*, named after
+        the field.  Intended for sharded generation: pass a subgroup (e.g.
+        one per sky tile) to write an independent, self-contained shard that
+        can be created, read, and validated without touching any other
+        shard.
+
+        Parameters
+        ----------
+        group : zarr.Group or str or pathlib.Path
+            An open zarr group to write into, or a store path/URL to open
+            (in append mode, creating it if it doesn't exist).
+        """
+        if not isinstance(group, zarr.Group):
+            group = zarr.open_group(store=str(group), mode="a")
+        for field in _CATALOGUE_FIELDS:
+            group.create_array(field, data=getattr(self, field), overwrite=True)
+
+    @classmethod
+    def from_zarr(cls, group: zarr.Group | str | Path) -> GalaxyCatalogue:
+        """Load a catalogue from a zarr group written by :meth:`to_zarr`.
+
+        Parameters
+        ----------
+        group : zarr.Group or str or pathlib.Path
+            An open zarr group, or a store path/URL to open read-only.
+
+        Returns
+        -------
+        GalaxyCatalogue
+        """
+        if not isinstance(group, zarr.Group):
+            group = zarr.open_group(store=str(group), mode="r")
+        data = {field: np.asarray(group[field]) for field in _CATALOGUE_FIELDS}
+        return cls(**data)
 
 
 class SelectionFunction(ABC):
@@ -170,3 +225,124 @@ class MagnitudeLimitedSurvey(SelectionFunction):
             ra=galaxies.ra[mask],
             dec=galaxies.dec[mask],
         )
+
+    def completeness(
+        self,
+        redshifts: np.ndarray,
+        ra: np.ndarray,
+        dec: np.ndarray,
+        cosmology: FLRW,
+        luminosity: LuminosityModel,
+    ) -> np.ndarray:
+        r"""Return the survey completeness at each given position.
+
+        The completeness is the probability that a galaxy at a given
+        redshift would be brighter than the survey's limiting magnitude,
+        i.e. the fraction of the luminosity function ``luminosity`` that
+        lies above the apparent-magnitude threshold once the distance
+        modulus at that redshift is accounted for:
+
+        .. math::
+
+            C(z) = \mathrm{CDF}_{\,L}\!\bigl(m_{\mathrm{lim}} - \mu(z)\bigr)
+
+        This is used to determine, for a randomly drawn host galaxy of
+        unknown luminosity, the probability that it would have been
+        included in the observed catalogue.
+
+        ``ra`` and ``dec`` are accepted but currently unused — completeness
+        depends only on redshift for a uniform-depth, magnitude-limited
+        survey.  They are part of the signature so that future sky-dependent
+        completeness models (survey footprints, Galactic-plane masking) can
+        be substituted without changing call sites.
+
+        Parameters
+        ----------
+        redshifts : numpy.ndarray
+            Redshifts at which to evaluate completeness, shape ``(n,)``.
+        ra : numpy.ndarray
+            Right ascensions in radians, shape ``(n,)``.  Currently unused.
+        dec : numpy.ndarray
+            Declinations in radians, shape ``(n,)``.  Currently unused.
+        cosmology : astropy.cosmology.FLRW
+            Background cosmology used to compute the distance modulus.
+        luminosity : bagpuss.universe.LuminosityModel
+            Luminosity model whose :meth:`~bagpuss.universe.LuminosityModel.cdf`
+            gives the fraction of galaxies brighter than a given absolute
+            magnitude.
+
+        Returns
+        -------
+        numpy.ndarray
+            Completeness at each position, shape ``(n,)``, values in
+            ``[0, 1]``.
+        """
+        d_L_pc = cosmology.luminosity_distance(redshifts).to("pc").value  # pyright: ignore[reportAttributeAccessIssue]
+        distance_modulus = 5.0 * np.log10(d_L_pc / 10.0)
+        magnitude_threshold = self.m_lim - distance_modulus
+        return luminosity.cdf(magnitude_threshold)
+
+
+# ---------------------------------------------------------------------------
+# Catalogue builder
+# ---------------------------------------------------------------------------
+
+
+def build_catalogue(
+    universe: Universe,
+    selection: MagnitudeLimitedSurvey,
+    rng: np.random.Generator | None = None,
+) -> GalaxyCatalogue:
+    """Build a Poisson realisation of the magnitude-limited galaxy catalogue.
+
+    The expected total number of galaxies is determined by
+    ``universe.luminosity.number_density()`` (the integral of the
+    luminosity function over its magnitude range, in Mpc⁻³) multiplied by
+    ``universe.structure.survey_volume()`` (the comoving volume in Mpc³).
+    A Poisson draw from this expected count gives the total galaxy
+    population, and ``selection`` is then applied to retain only the
+    galaxies bright enough to be observed.
+
+    The catalogue size is not specified by the caller — it emerges from
+    the physics of the luminosity function and the survey volume, just as
+    it would in a real survey.  For this to give a meaningful absolute
+    count, ``phi_star`` in the luminosity model must be supplied in
+    physical units (Mpc⁻³ mag⁻¹).
+
+    Parameters
+    ----------
+    universe : Universe
+        Simulated universe providing the luminosity and structure models.
+    selection : MagnitudeLimitedSurvey
+        Magnitude-limited selection function to apply to the galaxy
+        population.
+    rng : numpy.random.Generator or None, optional
+        Random number generator.  If *None*, ``numpy.random.default_rng()``
+        is used.
+
+    Returns
+    -------
+    GalaxyCatalogue
+        A Poisson realisation of the observable galaxy catalogue.  All
+        returned galaxies satisfy the magnitude limit imposed by
+        ``selection``.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    volume = universe.structure.survey_volume(universe.cosmology)
+    density = universe.luminosity.number_density()
+    n_total = int(rng.poisson(density * volume))
+
+    if n_total == 0:
+        empty: np.ndarray = np.array([], dtype=float)
+        return GalaxyCatalogue(
+            redshifts=empty,
+            luminosities=empty,
+            apparent_magnitudes=empty,
+            ra=empty,
+            dec=empty,
+        )
+
+    galaxies = universe.sample(n_total, rng)
+    return selection.apply(galaxies, universe.cosmology)

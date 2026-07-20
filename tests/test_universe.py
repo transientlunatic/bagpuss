@@ -9,6 +9,7 @@ from bagpuss.galaxies import GalaxySet
 from bagpuss.universe import (
     LuminosityModel,
     PointProcess,
+    SkyPatch,
     Structure,
     Universe,
 )
@@ -24,6 +25,14 @@ class _FlatLuminosity(LuminosityModel):
     def sample(self, n: int, rng: np.random.Generator | None = None) -> np.ndarray:
         """Return a constant-luminosity array."""
         return np.ones(n) * 1e10
+
+    def cdf(self, magnitude: np.ndarray) -> np.ndarray:
+        """Return 1.0 everywhere; every galaxy has the same luminosity."""
+        return np.ones_like(np.asarray(magnitude, dtype=float))
+
+    def number_density(self) -> float:
+        """Return a fixed placeholder density of 1.0 Mpc⁻³."""
+        return 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +141,120 @@ class TestPointProcess(unittest.TestCase):
         ra, dec = pp.sample_positions(10, rng=None)
         self.assertEqual(ra.shape, (10,))
         self.assertEqual(dec.shape, (10,))
+
+
+# ---------------------------------------------------------------------------
+# SkyPatch
+# ---------------------------------------------------------------------------
+
+
+class TestSkyPatch(unittest.TestCase):
+    """Tests for the SkyPatch structure decorator."""
+
+    def test_full_sky_fraction_is_one(self) -> None:
+        """A tile covering the whole sky has sky_fraction == 1."""
+        tile = SkyPatch(
+            PointProcess(z_max=1.0),
+            ra_range=(0.0, 2.0 * np.pi),
+            sin_dec_range=(-1.0, 1.0),
+        )
+        self.assertAlmostEqual(tile.sky_fraction, 1.0)
+
+    def test_quarter_sky_fraction(self) -> None:
+        """A tile covering a quarter of ra and half of sin(dec) is 1/8 sky."""
+        tile = SkyPatch(
+            PointProcess(z_max=1.0),
+            ra_range=(0.0, np.pi / 2.0),
+            sin_dec_range=(0.0, 1.0),
+        )
+        self.assertAlmostEqual(tile.sky_fraction, 0.125)
+
+    def test_survey_volume_scaled_by_sky_fraction(self) -> None:
+        """survey_volume is the base model's volume times sky_fraction."""
+        base = PointProcess(z_max=3.0)
+        tile = SkyPatch(base, ra_range=(0.0, np.pi), sin_dec_range=(0.0, 1.0))
+        self.assertAlmostEqual(
+            tile.survey_volume(Planck18), base.survey_volume(Planck18) * 0.25
+        )
+
+    def test_sample_redshifts_delegates_to_base(self) -> None:
+        """sample_redshifts matches the base model given the same RNG state."""
+        base = PointProcess(z_max=2.0)
+        tile = SkyPatch(base, ra_range=(0.0, np.pi), sin_dec_range=(0.0, 1.0))
+        z_base = base.sample_redshifts(100, Planck18, np.random.default_rng(3))
+        z_tile = tile.sample_redshifts(100, Planck18, np.random.default_rng(3))
+        np.testing.assert_array_equal(z_base, z_tile)
+
+    def test_sample_positions_within_tile(self) -> None:
+        """Sampled ra/dec always lie within the declared tile bounds."""
+        tile = SkyPatch(
+            PointProcess(z_max=1.0),
+            ra_range=(1.0, 2.0),
+            sin_dec_range=(-0.5, 0.5),
+        )
+        ra, dec = tile.sample_positions(2000, np.random.default_rng(11))
+        self.assertGreaterEqual(float(ra.min()), 1.0)
+        self.assertLess(float(ra.max()), 2.0)
+        self.assertGreaterEqual(float(np.sin(dec).min()), -0.5)
+        self.assertLess(float(np.sin(dec).max()), 0.5)
+
+    def test_sample_positions_shape(self) -> None:
+        """sample_positions returns arrays of the requested length."""
+        tile = SkyPatch(
+            PointProcess(z_max=1.0), ra_range=(0.0, 1.0), sin_dec_range=(-1.0, 0.0)
+        )
+        ra, dec = tile.sample_positions(50, np.random.default_rng(0))
+        self.assertEqual(ra.shape, (50,))
+        self.assertEqual(dec.shape, (50,))
+
+    def test_sample_positions_default_rng(self) -> None:
+        """sample_positions works when rng=None."""
+        tile = SkyPatch(
+            PointProcess(z_max=1.0), ra_range=(0.0, 1.0), sin_dec_range=(-1.0, 0.0)
+        )
+        ra, dec = tile.sample_positions(10, rng=None)
+        self.assertEqual(ra.shape, (10,))
+        self.assertEqual(dec.shape, (10,))
+
+    def test_invalid_ra_range_out_of_bounds(self) -> None:
+        """ra_range outside [0, 2*pi] raises ValueError."""
+        with self.assertRaises(ValueError):
+            SkyPatch(
+                PointProcess(z_max=1.0), ra_range=(-0.1, 1.0), sin_dec_range=(-1.0, 1.0)
+            )
+
+    def test_invalid_ra_range_not_increasing(self) -> None:
+        """ra_range with min >= max raises ValueError."""
+        with self.assertRaises(ValueError):
+            SkyPatch(
+                PointProcess(z_max=1.0), ra_range=(2.0, 1.0), sin_dec_range=(-1.0, 1.0)
+            )
+
+    def test_invalid_sin_dec_range_out_of_bounds(self) -> None:
+        """sin_dec_range outside [-1, 1] raises ValueError."""
+        with self.assertRaises(ValueError):
+            SkyPatch(
+                PointProcess(z_max=1.0), ra_range=(0.0, 1.0), sin_dec_range=(-1.5, 1.0)
+            )
+
+    def test_invalid_sin_dec_range_not_increasing(self) -> None:
+        """sin_dec_range with min >= max raises ValueError."""
+        with self.assertRaises(ValueError):
+            SkyPatch(
+                PointProcess(z_max=1.0), ra_range=(0.0, 1.0), sin_dec_range=(0.5, 0.5)
+            )
+
+    def test_tiles_partition_expected_volume(self) -> None:
+        """Four equal tiles' volumes sum to the base model's full volume."""
+        base = PointProcess(z_max=1.5)
+        tiles = [
+            SkyPatch(base, ra_range=(0.0, np.pi), sin_dec_range=(0.0, 1.0)),
+            SkyPatch(base, ra_range=(np.pi, 2.0 * np.pi), sin_dec_range=(0.0, 1.0)),
+            SkyPatch(base, ra_range=(0.0, np.pi), sin_dec_range=(-1.0, 0.0)),
+            SkyPatch(base, ra_range=(np.pi, 2.0 * np.pi), sin_dec_range=(-1.0, 0.0)),
+        ]
+        total = sum(tile.survey_volume(Planck18) for tile in tiles)
+        self.assertAlmostEqual(total, base.survey_volume(Planck18))
 
 
 # ---------------------------------------------------------------------------

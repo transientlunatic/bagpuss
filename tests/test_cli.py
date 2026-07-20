@@ -245,3 +245,126 @@ class TestHeatmapCommand(unittest.TestCase):
                 ],
             )
             self.assertEqual(result.exit_code, 0, msg=result.output)
+
+
+# ---------------------------------------------------------------------------
+# mdc command group
+# ---------------------------------------------------------------------------
+
+_TINY_MDC_CONFIG = (
+    "z_max: 0.1\nphi_star: 1.0e-5\nm_lim: 25.0\nn_ra_tiles: 2\nn_dec_tiles: 1\n"
+    "n_injection_shards: 2\nn_draw_per_shard: 20\nd_max: 5000.0\nstore: store.zarr\n"
+)
+
+
+class TestMdcCommands(unittest.TestCase):
+    """Integration tests for the ``bagpuss mdc`` command group."""
+
+    def setUp(self) -> None:
+        """Create a shared CliRunner."""
+        self.runner = CliRunner()
+
+    def test_help_exits_zero(self) -> None:
+        """``bagpuss mdc --help`` exits 0 and lists every subcommand."""
+        result = self.runner.invoke(main, ["mdc", "--help"])
+        self.assertEqual(result.exit_code, 0)
+        for name in (
+            "generate-tile",
+            "consolidate",
+            "generate-injections",
+            "assemble-injections",
+            "package",
+            "make-dag",
+        ):
+            self.assertIn(name, result.output)
+
+    def test_full_pipeline_via_cli(self) -> None:
+        """The full tile->consolidate->shard->assemble->package chain succeeds."""
+        with self.runner.isolated_filesystem():
+            Path("config.yaml").write_text(_TINY_MDC_CONFIG, encoding="utf-8")
+
+            for tile_id in (0, 1):
+                result = self.runner.invoke(
+                    main,
+                    [
+                        "mdc",
+                        "generate-tile",
+                        "--config",
+                        "config.yaml",
+                        "--tile-id",
+                        str(tile_id),
+                    ],
+                )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+
+            result = self.runner.invoke(
+                main, ["mdc", "consolidate", "--config", "config.yaml"]
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+
+            for shard_id in (0, 1):
+                result = self.runner.invoke(
+                    main,
+                    [
+                        "mdc",
+                        "generate-injections",
+                        "--config",
+                        "config.yaml",
+                        "--shard-id",
+                        str(shard_id),
+                    ],
+                )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+
+            result = self.runner.invoke(
+                main, ["mdc", "assemble-injections", "--config", "config.yaml"]
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("2 shards", result.output)
+
+            result = self.runner.invoke(
+                main, ["mdc", "package", "--config", "config.yaml"]
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertTrue(Path("store.zarr/manifest.json").exists())
+
+    def test_consolidate_missing_tile_exits_nonzero(self) -> None:
+        """Consolidating with a tile missing exits non-zero and reports why."""
+        with self.runner.isolated_filesystem():
+            Path("config.yaml").write_text(_TINY_MDC_CONFIG, encoding="utf-8")
+            result = self.runner.invoke(
+                main,
+                ["mdc", "generate-tile", "--config", "config.yaml", "--tile-id", "0"],
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+
+            result = self.runner.invoke(
+                main, ["mdc", "consolidate", "--config", "config.yaml"]
+            )
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("FAILED", result.output)
+
+    def test_make_dag(self) -> None:
+        """``make-dag`` renders a DAG without touching condor."""
+        with self.runner.isolated_filesystem():
+            Path("config.yaml").write_text(_TINY_MDC_CONFIG, encoding="utf-8")
+            result = self.runner.invoke(
+                main,
+                [
+                    "mdc",
+                    "make-dag",
+                    "--config",
+                    "config.yaml",
+                    "--out-dir",
+                    "dag",
+                    "--bagpuss-executable",
+                    "/opt/venv/bin/bagpuss",
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertTrue(Path("dag/mdc.dag").exists())
+
+    def test_generate_tile_requires_config(self) -> None:
+        """Omitting --config is rejected by click before running."""
+        result = self.runner.invoke(main, ["mdc", "generate-tile", "--tile-id", "0"])
+        self.assertNotEqual(result.exit_code, 0)
