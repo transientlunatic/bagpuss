@@ -10,19 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - name: Check tag matches package version
-        run: |
-          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          init_version=$(python -c "import re; print(re.search(r'__version__ = \"(.+?)\"', open('bagpuss/__init__.py').read()).group(1))")
-          tag="${GITHUB_REF_NAME#v}"
-          echo "tag=$tag pyproject=$version __init__=$init_version"
-          [ "$tag" = "$version" ] && [ "$version" = "$init_version" ]
       - run: uv sync
       - run: uv run python -m unittest discover -s tests
       - run: uv build
+      - name: Check built version matches tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ls dist/
+          ls dist/ | grep -q "^bagpuss-${tag}[-.]"
       - uses: actions/upload-artifact@v4
         with:
           name: dist

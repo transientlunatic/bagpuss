@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "bagpuss"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Simulated galaxy and gravitational-wave catalogues for cosmological inference testing"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -19,6 +19,13 @@ dependencies = [
     "h5py>=3.10",
     "zarr>=3.2.1",
 ]
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { fallback_version = "0.0.0" }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "bagpuss/_version.py"
 
 [project.scripts]
 bagpuss = "bagpuss.cli:main"
