@@ -14,6 +14,9 @@ for testing cosmological inference pipelines:
 Institute for Gravitational Research, University of Glasgow.
 """
 
-__version__ = "0.1.0"
+try:
+    from bagpuss._version import __version__
+except ImportError:  # pragma: no cover - source tree without a build step
+    __version__ = "0.0.0"
 
 __all__: list[str] = ["__version__"]

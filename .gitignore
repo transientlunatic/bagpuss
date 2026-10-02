@@ -210,3 +210,6 @@ __marimo__/
 .claude/
 notebooks/
 docs/bagpuss.code-workspace
+
+# hatch-vcs generated
+bagpuss/_version.py
