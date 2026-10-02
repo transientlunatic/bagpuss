@@ -26,10 +26,12 @@ bagpuss = "bagpuss.cli:main"
 [project.optional-dependencies]
 # The MDC detection stage (SNRs, frames, skymaps). Not needed to generate
 # catalogues and injections. `bagpuss.mdc.detection` uses `minke.duty_cycle`,
-# which is in minke releases after 2.2.1 (not in 2.2.1 itself), hence the strict
-# lower bound: an install that resolves to 2.2.1 would fail at import time.
+# which is on minke's main branch but not in a release yet (2.2.1 lacks it); the
+# detection backend raises a clear ImportError in that case. Raise this bound to
+# the first minke release containing `duty_cycle` once it exists (a strict
+# `>2.2.1` is unresolvable until then, which breaks `uv sync`).
 detection = [
-    "minke>2.2.1",
+    "minke>=2.2.1",
     "ligo.skymap>=2.0",
     "igwn-ligolw>=2.1",
 ]

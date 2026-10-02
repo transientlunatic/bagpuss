@@ -42,5 +42,7 @@
 - BAYESTAR skymaps use the configured low-frequency cutoff throughout.
 
 ### Notes
-- The detection stage imports `minke.duty_cycle`, which is in minke releases
-  after 2.2.1 (not 2.2.1 itself); the `detection` extra requires `minke>2.2.1`.
+- The detection stage imports `minke.duty_cycle`, which is on minke's main branch
+  but not in a release yet (2.2.1 lacks it). The `detection` extra can only say
+  `minke>=2.2.1` until such a release exists; the detection backend raises a clear
+  `ImportError` if `duty_cycle` is missing.
