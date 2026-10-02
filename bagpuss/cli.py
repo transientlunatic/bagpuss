@@ -326,3 +326,365 @@ def heatmap_cmd(
         plt.show()
 
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# MDC (Mock Data Challenge) pipeline
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def mdc() -> None:
+    """Mock Data Challenge (MDC) generation pipeline.
+
+    One subcommand per stage of the sharded, condor-friendly pipeline in
+    :mod:`bagpuss.mdc.pipeline`. Every subcommand takes ``--config``, a YAML
+    file loaded via :func:`bagpuss.mdc.config.load_config` -- see
+    ``docs/mdc.rst`` for the full config schema and pipeline shape.
+    """
+
+
+_CONFIG_OPTION = click.option(
+    "--config",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="YAML MDCConfig file (see bagpuss.mdc.config.MDCConfig).",
+)
+
+
+@mdc.command("generate-tile")
+@_CONFIG_OPTION
+@click.option("--tile-id", type=int, required=True, help="Sky-tile index to generate.")
+def mdc_generate_tile(config: Path, tile_id: int) -> None:
+    """Generate one galaxy-catalogue sky tile (a Tier-1 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import generate_catalogue_tile
+
+    cfg = load_config(config)
+    catalogue = generate_catalogue_tile(cfg, tile_id)
+    click.echo(f"tile {tile_id}: {len(catalogue)} galaxies written to {cfg.store}")
+
+
+@mdc.command("consolidate")
+@_CONFIG_OPTION
+def mdc_consolidate(config: Path) -> None:
+    """Validate and consolidate all catalogue tiles (the Tier-2 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError, consolidate_catalogue
+
+    cfg = load_config(config)
+    try:
+        report = consolidate_catalogue(cfg)
+    except MDCValidationError as exc:
+        click.echo(f"Catalogue validation FAILED: {exc.report['issues']}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"consolidated {report['n_tiles']} tiles, {report['total_galaxies']} galaxies"
+    )
+
+
+@mdc.command("generate-injections")
+@_CONFIG_OPTION
+@click.option(
+    "--shard-id", type=int, required=True, help="Injection-shard index to generate."
+)
+def mdc_generate_injections(config: Path, shard_id: int) -> None:
+    """Generate one injection shard (a Tier-3 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import generate_injection_shard
+
+    cfg = load_config(config)
+    injections = generate_injection_shard(cfg, shard_id)
+    click.echo(f"shard {shard_id}: {len(injections)} injections written to {cfg.store}")
+
+
+@mdc.command("assemble-injections")
+@_CONFIG_OPTION
+def mdc_assemble_injections(config: Path) -> None:
+    """Validate and consolidate all injection shards (the Tier-4 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError, assemble_injections
+
+    cfg = load_config(config)
+    try:
+        report = assemble_injections(cfg)
+    except MDCValidationError as exc:
+        click.echo(f"Injection validation FAILED: {exc.report['issues']}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"consolidated {report['n_shards']} shards, "
+        f"{report['total_injections']} injections"
+    )
+
+
+@mdc.command("detect-injections")
+@_CONFIG_OPTION
+@click.option(
+    "--shard-id", type=int, required=True, help="Injection-shard index to process."
+)
+def mdc_detect_injections(config: Path, shard_id: int) -> None:
+    """Compute SNRs and write frames/blueprints for one shard (a DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import detect_injection_shard
+
+    cfg = load_config(config)
+    summary = detect_injection_shard(cfg, shard_id)
+    click.echo(
+        f"shard {shard_id}: {summary['n_detectable']}/{summary['n_injections']} "
+        f"injections above SNR {cfg.snr_threshold}"
+    )
+
+
+@mdc.command("assemble-detections")
+@_CONFIG_OPTION
+def mdc_assemble_detections(config: Path) -> None:
+    """Validate detection shards and merge their blueprints (a DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError, assemble_detections
+
+    cfg = load_config(config)
+    try:
+        report = assemble_detections(cfg)
+    except MDCValidationError as exc:
+        click.echo(f"Detection validation FAILED: {exc.report['issues']}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"{report['total_detectable']}/{report['total_injections']} injections "
+        f"detectable across {report['n_shards']} shards"
+    )
+
+
+@mdc.command("export-release")
+@_CONFIG_OPTION
+@click.option(
+    "--out-dir",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Directory to assemble the release in (must be empty or absent).",
+)
+@click.option(
+    "--skymap-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Per-shard skymap directory (default: <output_dir>/skymaps).",
+)
+@click.option("--name", default="bagpuss-mdc-z3", show_default=True)
+@click.option("--release-version", default="1.0.0", show_default=True)
+@click.option("--title", default=None, help="Zenodo title.")
+@click.option(
+    "--creator",
+    "creators",
+    multiple=True,
+    help="Zenodo creator as 'Family, Given;Affiliation' (repeatable).",
+)
+@click.option("--license", "license_id", default="cc-by-4.0", show_default=True)
+@click.option("--glade", is_flag=True, help="Also include a GLADE+-style catalogue.")
+@click.option("--overwrite", is_flag=True, help="Replace a non-empty --out-dir.")
+def mdc_export_release(  # noqa: PLR0913
+    config: Path,
+    out_dir: Path,
+    skymap_dir: Path | None,
+    name: str,
+    release_version: str,
+    title: str | None,
+    creators: tuple[str, ...],
+    license_id: str,
+    glade: bool,
+    overwrite: bool,
+) -> None:
+    """Assemble the data release (the files that go on Zenodo) from the store."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError
+    from bagpuss.mdc.release import build_release, verify_release
+
+    cfg = load_config(config)
+    parsed = [
+        {"name": n.strip(), "affiliation": a.strip()}
+        for n, _, a in (c.partition(";") for c in creators)
+    ]
+    try:
+        manifest = build_release(
+            cfg,
+            out_dir,
+            config_path=config,
+            skymap_dir=skymap_dir,
+            name=name,
+            version=release_version,
+            title=title,
+            creators=parsed or None,
+            license_id=license_id,
+            glade=glade,
+            overwrite=overwrite,
+        )
+    except (MDCValidationError, FileExistsError) as exc:
+        click.echo(f"Release FAILED: {exc}", err=True)
+        raise SystemExit(1) from exc
+    report = verify_release(out_dir)
+    for issue in report["issues"]:
+        click.echo(f"verify: {issue}", err=True)
+    c = manifest["counts"]
+    click.echo(
+        f"wrote {len(manifest['files'])} files to {out_dir}: "
+        f"{c['n_galaxies']} galaxies, {c['n_injections']} injections, "
+        f"{c['n_detectable']} detectable, "
+        f"{c['n_skymaps']} skymaps; verification {'OK' if report['ok'] else 'FAILED'}"
+    )
+    click.echo(
+        "Upload every file except zenodo_metadata.json, which holds the metadata "
+        "for the deposit form or API."
+    )
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+@mdc.command("verify-release")
+@click.argument("release_dir", type=click.Path(exists=True, path_type=Path))
+def mdc_verify_release(release_dir: Path) -> None:
+    """Check a release directory against its own manifest and checksums."""
+    from bagpuss.mdc.release import verify_release
+
+    report = verify_release(release_dir)
+    for issue in report["issues"]:
+        click.echo(issue, err=True)
+    click.echo("release OK" if report["ok"] else "release FAILED")
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+@mdc.command("package")
+@_CONFIG_OPTION
+def mdc_package(config: Path) -> None:
+    """Write the run's manifest/provenance (the Tier-5 DAG node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import package_manifest
+
+    cfg = load_config(config)
+    manifest = package_manifest(cfg)
+    click.echo(f"wrote manifest for {cfg.store}: {manifest}")
+
+
+@mdc.command("export-glade")
+@_CONFIG_OPTION
+@click.option(
+    "--out-dir",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Directory to write catalogue.dat, completeness.dat, and README.txt into.",
+)
+def mdc_export_glade(config: Path, out_dir: Path) -> None:
+    """Export the consolidated catalogue as a GLADE+-style flat-ASCII product."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError, export_glade_catalogue
+
+    cfg = load_config(config)
+    try:
+        report = export_glade_catalogue(cfg, out_dir)
+    except MDCValidationError as exc:
+        click.echo(f"Export FAILED: {exc.report['issues']}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(f"exported {report['n_galaxies']} galaxies to {report['out_dir']}")
+
+
+@mdc.command("expected-count")
+@_CONFIG_OPTION
+@click.option(
+    "--d-max",
+    type=float,
+    default=None,
+    help="Override config.d_max (Mpc) for the detected-count estimate.",
+)
+@click.option(
+    "--t-obs-years",
+    type=float,
+    default=None,
+    help="Observation window length in years, overriding config.t_start/t_end "
+    "(the window still starts at config.t_start, defaulting to the O3 start).",
+)
+def mdc_expected_count(
+    config: Path, d_max: float | None, t_obs_years: float | None
+) -> None:
+    """Print the expected injection count implied by a config -- no simulation run.
+
+    A pure closed-form calculation (see
+    :func:`bagpuss.mdc.pipeline.expected_injection_count`): useful for
+    sanity-checking a proposed ``rate_density``/observation-window/detector
+    sensitivity before submitting an expensive DAG.
+    """
+    from bagpuss.injection import GPS_O3_START
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import expected_injection_count
+    from bagpuss.population import SECONDS_PER_YEAR
+
+    cfg = load_config(config)
+
+    t_end = None
+    if t_obs_years is not None:
+        t_start_base = cfg.t_start if cfg.t_start is not None else GPS_O3_START
+        t_end = t_start_base + t_obs_years * SECONDS_PER_YEAR
+
+    result = expected_injection_count(cfg, d_max=d_max, t_end=t_end)
+
+    click.echo(f"observation window: {result['t_obs_years']:.3f} years")
+    click.echo(
+        f"expected mergers in survey volume (z_max={cfg.z_max}): "
+        f"{result['n_total']:.2f}"
+    )
+    if result["d_max"] is not None:
+        click.echo(
+            f"expected DETECTED mergers (d_max={result['d_max']:.1f} Mpc, "
+            f"hard distance-threshold placeholder): {result['n_detected']:.2f}"
+        )
+    else:
+        click.echo("no d_max configured or passed -- detected count not estimated")
+
+
+@mdc.command("make-dag")
+@_CONFIG_OPTION
+@click.option(
+    "--out-dir",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Directory to write mdc.dag and the per-stage .sub files into.",
+)
+@click.option(
+    "--bagpuss-executable",
+    type=str,
+    required=True,
+    help="Absolute path to the bagpuss entry point on the execute node "
+    "(e.g. a venv's bin/bagpuss).",
+)
+@click.option(
+    "--skip-detection",
+    is_flag=True,
+    help="Omit the detection stage (SNRs/frames/blueprints) from the DAG.",
+)
+@click.option(
+    "--detection-only",
+    is_flag=True,
+    help="Render only the detection stage, for an already-generated store "
+    "(never regenerates the catalogue or injections).",
+)
+def mdc_make_dag(
+    config: Path,
+    out_dir: Path,
+    bagpuss_executable: str,
+    skip_detection: bool,
+    detection_only: bool,
+) -> None:
+    """Render the HTCondor DAG and submit files for a run, without submitting."""
+    from bagpuss.mdc.condor import write_dag
+    from bagpuss.mdc.config import load_config
+
+    cfg = load_config(config)
+    dag_path = write_dag(
+        cfg,
+        config,
+        out_dir,
+        bagpuss_executable,
+        include_detection=not skip_detection,
+        include_generation=not detection_only,
+    )
+    click.echo(
+        f"Wrote DAG ({cfg.n_tiles} tiles, {cfg.n_injection_shards} shards) "
+        f"to {dag_path}"
+    )

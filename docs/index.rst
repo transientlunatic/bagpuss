@@ -14,6 +14,7 @@ gravitational-wave catalogues for testing cosmological inference pipelines.
    catalogue
    population
    injection
+   mdc
    plotting
    autoapi/index
 

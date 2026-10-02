@@ -17,15 +17,35 @@ Concepts
 Host galaxy assignment
 ^^^^^^^^^^^^^^^^^^^^^^
 
-Each BBH event is assigned a host galaxy drawn uniformly at random from the
-catalogue.  The event inherits the host's sky position (RA, Dec) and
-redshift; the luminosity distance is then computed from the redshift via the
-background cosmology.
+Each BBH event first gets a *trial* host: a redshift and sky position drawn
+from the simulated universe's full galaxy population. The survey's completeness
+at that redshift is the probability that such a host would be bright enough to
+appear in the :class:`~bagpuss.catalogue.GalaxyCatalogue`. Events that pass this
+probabilistic cut are assigned a randomly chosen row of the catalogue (and
+inherit its sky position and redshift; ``host_galaxy_index`` records the row);
+the rest keep their trial position and are marked ``host_galaxy_index == -1``.
+The luminosity distance is then computed from the redshift via the background
+cosmology.
 
-This flat weighting is appropriate when the expected merger rate is
-proportional to the number of catalogued galaxies.  For stellar-mass- or
-star-formation-rate-weighted host assignment, subclass or wrap
-:func:`~bagpuss.injection.create_injection_set`.
+This is unbiased if the catalogue was built from the same universe and
+selection, and it implicitly assumes the merger rate is proportional to galaxy
+number. For stellar-mass- or star-formation-rate-weighted host assignment,
+subclass or wrap :func:`~bagpuss.injection.sample_host_galaxies`.
+
+.. note::
+
+   When the event redshifts are drawn from a merger-rate model (as in
+   :func:`~bagpuss.injection.build_injection_set`), a catalogued event's host is
+   a *uniformly random* catalogue row, so the redshifts of catalogued events
+   follow the catalogue's own redshift distribution rather than the
+   :math:`R(z)/(1+z)` weighting of the event distribution (uncatalogued events
+   do follow it). For a constant rate this is a factor of :math:`(1+z)` in the
+   catalogued events' redshift distribution, and it only matters where
+   catalogued hosts are common, i.e. at low redshift or with a deep survey.
+
+:func:`~bagpuss.injection.build_injection_set` does the same but draws the
+number of events from a :class:`~bagpuss.population.MergerRate` and an
+observation window, instead of taking a caller-chosen ``n_draw``.
 
 Extrinsic parameters
 ^^^^^^^^^^^^^^^^^^^^
@@ -84,7 +104,8 @@ model through to an injection set, then visualises the injections.
        ),
    )
    galaxies = universe.sample(5_000, rng=rng)
-   catalogue = MagnitudeLimitedSurvey(m_lim=19.5).apply(galaxies, Planck18)
+   selection = MagnitudeLimitedSurvey(m_lim=19.5)
+   catalogue = selection.apply(galaxies, Planck18)
 
    # Stage 4: BBH population
    population = PopulationModel(
@@ -97,9 +118,10 @@ model through to an injection set, then visualises the injections.
 
    # Stage 5: injection set with distance threshold
    injections = create_injection_set(
+       universe=universe,
        catalogue=catalogue,
+       selection=selection,
        population=population,
-       cosmology=Planck18,
        n_draw=500,
        detectable=DistanceThreshold(d_max=1_500.0),
        rng=rng,

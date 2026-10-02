@@ -23,8 +23,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
+from astropy.cosmology import FLRW
 from scipy.stats import beta as beta_dist
 from scipy.stats import truncnorm
+
+from bagpuss.universe import Structure
 
 __all__: list[str] = [
     "BBHSet",
@@ -34,9 +37,23 @@ __all__: list[str] = [
     "PowerLawPlusPeakMassDistribution",
     "IsotropicSpinDistribution",
     "DefaultSpinDistribution",
+    "MergerRate",
+    "ConstantMergerRate",
+    "expected_n_mergers",
+    "sample_merger_redshifts",
+    "SECONDS_PER_YEAR",
 ]
 
 _GRID_SIZE: int = 1_000
+
+#: Grid resolution used to numerically integrate/sample the rate-weighted
+#: redshift distribution (see :func:`expected_n_mergers` and
+#: :func:`sample_merger_redshifts`).
+_RATE_GRID_SIZE: int = 10_000
+
+#: Julian year in seconds (365.25 days), used to convert an observation
+#: window in GPS seconds into years for the rate integral.
+SECONDS_PER_YEAR: float = 365.25 * 86400.0
 
 
 # ---------------------------------------------------------------------------
@@ -609,10 +626,219 @@ class DefaultSpinDistribution(SpinDistribution):
             rng = np.random.default_rng()
         seed1 = int(rng.integers(0, 2**31))
         seed2 = int(rng.integers(0, 2**31))
-        a1 = beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed1)
-        a2 = beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed2)
+        a1 = np.asarray(
+            beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed1)
+        )
+        a2 = np.asarray(
+            beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed2)
+        )
         cos_tilt1 = self._sample_cos_tilt(n, rng)
         cos_tilt2 = self._sample_cos_tilt(n, rng)
         phi12 = rng.uniform(0.0, 2.0 * np.pi, size=n)
         phi_jl = rng.uniform(0.0, 2.0 * np.pi, size=n)
         return a1, a2, cos_tilt1, cos_tilt2, phi12, phi_jl
+
+
+# ---------------------------------------------------------------------------
+# Merger rate
+# ---------------------------------------------------------------------------
+
+
+class MergerRate(ABC):
+    r"""Abstract base class for BBH merger-rate density models.
+
+    A merger-rate density model gives the source-frame comoving merger-rate
+    density :math:`R(z)` in :math:`\mathrm{Mpc}^{-3}\,\mathrm{yr}^{-1}`
+    (mergers per unit comoving volume per unit *source-frame* time). This is
+    the physical quantity that determines how many BBH events actually occur
+    within a survey volume and observation window, playing the same role
+    for the injection pipeline that
+    :meth:`~bagpuss.universe.LuminosityModel.number_density` plays for
+    :func:`~bagpuss.catalogue.build_catalogue`.
+
+    Subclasses must implement :meth:`rate_density`.
+    """
+
+    @abstractmethod
+    def rate_density(self, z: np.ndarray) -> np.ndarray:
+        r"""Return the source-frame comoving merger-rate density :math:`R(z)`.
+
+        Parameters
+        ----------
+        z : numpy.ndarray
+            Redshifts at which to evaluate the rate density, shape ``(n,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Merger-rate density in :math:`\mathrm{Mpc}^{-3}\,\mathrm{yr}^{-1}`
+            at each redshift, shape ``(n,)``.
+        """
+
+
+class ConstantMergerRate(MergerRate):
+    r"""A merger-rate density that does not evolve with redshift.
+
+    :math:`R(z) = R_0` for all :math:`z`, i.e. mergers are uniformly
+    distributed in comoving volume and source-frame time. This mirrors the
+    non-evolving galaxy number density assumed by
+    :class:`~bagpuss.universe.PointProcess`; a redshift-evolving rate (e.g.
+    tracking the Madau-Dickinson star-formation history) can be added later
+    as another :class:`MergerRate` subclass without changing any call site.
+
+    Parameters
+    ----------
+    rate_density_value : float
+        The (constant) merger-rate density in
+        :math:`\mathrm{Mpc}^{-3}\,\mathrm{yr}^{-1}`. Must be positive.
+
+    Raises
+    ------
+    ValueError
+        If ``rate_density_value <= 0``.
+    """
+
+    def __init__(self, rate_density_value: float) -> None:
+        if rate_density_value <= 0.0:
+            raise ValueError(
+                f"rate_density_value must be positive, got {rate_density_value!r}"
+            )
+        self.rate_density_value = rate_density_value
+
+    def rate_density(self, z: np.ndarray) -> np.ndarray:
+        """Return the constant rate density, broadcast to the shape of ``z``.
+
+        Parameters
+        ----------
+        z : numpy.ndarray
+            Redshifts at which to evaluate the rate density, shape ``(n,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``rate_density_value`` repeated for each redshift, shape ``(n,)``.
+        """
+        z = np.asarray(z, dtype=float)
+        return np.full_like(z, self.rate_density_value)
+
+
+def _rate_weight_grid(
+    structure: Structure,
+    cosmology: FLRW,
+    rate: MergerRate,
+    grid_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    r"""Return the ``(z, weight)`` grid used to integrate/sample merger events.
+
+    ``weight(z) = R(z) / (1 + z) * dV_C/dz`` -- the source-frame rate density
+    converted to an observer-frame rate per unit redshift. The :math:`1/(1+z)`
+    factor accounts for cosmological time dilation: a fixed interval of
+    source-frame time corresponds to a longer interval in the detector frame,
+    so the *observed* merger rate from a shell at redshift ``z`` is reduced
+    relative to the source-frame rate by exactly this factor.
+    """
+    z_grid = np.linspace(0.0, structure.z_max, grid_size)
+    dvc_dz = structure.differential_comoving_volume(z_grid, cosmology)
+    weight = rate.rate_density(z_grid) / (1.0 + z_grid) * dvc_dz
+    return z_grid, weight
+
+
+def expected_n_mergers(
+    structure: Structure,
+    cosmology: FLRW,
+    rate: MergerRate,
+    t_start: float,
+    t_end: float,
+    grid_size: int = _RATE_GRID_SIZE,
+) -> float:
+    r"""Return the expected number of mergers observed in ``[t_start, t_end]``.
+
+    Computes
+
+    .. math::
+
+        N = T_{\rm obs} \int_0^{z_{\max}} \frac{R(z)}{1+z}
+            \frac{dV_C}{dz} \, dz
+
+    where :math:`T_{\rm obs}` is the observation window converted to years
+    and the :math:`1/(1+z)` factor accounts for cosmological time dilation
+    between source-frame merger rate and detector-frame observed rate (see
+    :func:`_rate_weight_grid`). Combined with a Poisson draw, this gives a
+    physically motivated event count analogous to how
+    :func:`~bagpuss.catalogue.build_catalogue` Poisson-realises the galaxy
+    count from ``number_density() * survey_volume()``.
+
+    Parameters
+    ----------
+    structure : bagpuss.universe.Structure
+        Structure model providing ``z_max`` and
+        :meth:`~bagpuss.universe.Structure.differential_comoving_volume`.
+    cosmology : astropy.cosmology.FLRW
+        Background cosmology.
+    rate : MergerRate
+        Merger-rate density model.
+    t_start : float
+        Start of the observation window in GPS seconds.
+    t_end : float
+        End of the observation window in GPS seconds.
+    grid_size : int, optional
+        Number of points used to numerically integrate over ``[0, z_max]``.
+
+    Returns
+    -------
+    float
+        Expected number of observed mergers (before any detectability cut).
+    """
+    z_grid, weight = _rate_weight_grid(structure, cosmology, rate, grid_size)
+    rate_per_year = float(np.trapezoid(weight, z_grid))
+    t_obs_years = (t_end - t_start) / SECONDS_PER_YEAR
+    return rate_per_year * t_obs_years
+
+
+def sample_merger_redshifts(
+    structure: Structure,
+    cosmology: FLRW,
+    rate: MergerRate,
+    n: int,
+    rng: np.random.Generator | None = None,
+    grid_size: int = _RATE_GRID_SIZE,
+) -> np.ndarray:
+    r"""Draw merger redshifts weighted by rate density and time dilation.
+
+    Samples from the distribution :math:`p(z) \propto R(z)/(1+z) \, dV_C/dz`
+    (see :func:`_rate_weight_grid`) via inverse-CDF on a precomputed grid,
+    the same technique :meth:`~bagpuss.universe.PointProcess.sample_redshifts`
+    uses for the unweighted (galaxy) case.
+
+    Parameters
+    ----------
+    structure : bagpuss.universe.Structure
+        Structure model providing ``z_max`` and
+        :meth:`~bagpuss.universe.Structure.differential_comoving_volume`.
+    cosmology : astropy.cosmology.FLRW
+        Background cosmology.
+    rate : MergerRate
+        Merger-rate density model.
+    n : int
+        Number of redshifts to sample.
+    rng : numpy.random.Generator or None, optional
+        Random number generator. If *None*, ``numpy.random.default_rng()``
+        is used.
+    grid_size : int, optional
+        Number of points used to build the inverse-CDF grid.
+
+    Returns
+    -------
+    numpy.ndarray
+        Merger redshifts, shape ``(n,)``.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    z_grid, weight = _rate_weight_grid(structure, cosmology, rate, grid_size)
+    dz = np.diff(z_grid)
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (weight[:-1] + weight[1:]) * dz)])
+    cdf /= cdf[-1]
+
+    u = rng.uniform(0.0, 1.0, size=n)
+    return np.asarray(np.interp(u, cdf, z_grid))

@@ -3,16 +3,22 @@
 import unittest
 
 import numpy as np
+from astropy.cosmology import Planck18
 
 from bagpuss.population import (
     BBHSet,
+    ConstantMergerRate,
     DefaultSpinDistribution,
     IsotropicSpinDistribution,
     MassDistribution,
+    MergerRate,
     PopulationModel,
     PowerLawPlusPeakMassDistribution,
     SpinDistribution,
+    expected_n_mergers,
+    sample_merger_redshifts,
 )
+from bagpuss.universe import PointProcess, SkyPatch
 
 # ---------------------------------------------------------------------------
 # Shared parameter sets
@@ -134,13 +140,13 @@ class TestPopulationModel(unittest.TestCase):
         return PopulationModel(mass=_make_mass(), spin=_make_isotropic_spin())
 
     def test_stores_mass(self) -> None:
-        """mass attribute is stored."""
+        """Mass attribute is stored."""
         mass = _make_mass()
         pm = PopulationModel(mass=mass, spin=_make_isotropic_spin())
         self.assertIs(pm.mass, mass)
 
     def test_stores_spin(self) -> None:
-        """spin attribute is stored."""
+        """Spin attribute is stored."""
         spin = _make_isotropic_spin()
         pm = PopulationModel(mass=_make_mass(), spin=spin)
         self.assertIs(pm.spin, spin)
@@ -402,3 +408,191 @@ class TestDefaultSpinDistribution(unittest.TestCase):
         out_b = s.sample(40, rng=np.random.default_rng(13))
         for a, b in zip(out_a, out_b):
             np.testing.assert_array_equal(a, b)
+
+
+# ---------------------------------------------------------------------------
+# MergerRate / ConstantMergerRate
+# ---------------------------------------------------------------------------
+
+_ONE_YEAR_SECONDS = 365.25 * 86400.0
+
+
+class TestMergerRateIsAbstract(unittest.TestCase):
+    """MergerRate cannot be instantiated directly."""
+
+    def test_is_abstract(self) -> None:
+        """Direct instantiation raises TypeError."""
+        with self.assertRaises(TypeError):
+            MergerRate()  # type: ignore[abstract]
+
+
+class TestConstantMergerRate(unittest.TestCase):
+    """Tests for the redshift-independent merger-rate density."""
+
+    def test_stores_rate_density_value(self) -> None:
+        """rate_density_value is stored on the instance."""
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        self.assertEqual(rate.rate_density_value, 1e-6)
+
+    def test_invalid_rate_density_zero(self) -> None:
+        """rate_density_value = 0 raises ValueError."""
+        with self.assertRaises(ValueError):
+            ConstantMergerRate(rate_density_value=0.0)
+
+    def test_invalid_rate_density_negative(self) -> None:
+        """Negative rate_density_value raises ValueError."""
+        with self.assertRaises(ValueError):
+            ConstantMergerRate(rate_density_value=-1e-6)
+
+    def test_rate_density_is_constant(self) -> None:
+        """rate_density returns the same value at every redshift."""
+        rate = ConstantMergerRate(rate_density_value=2.5e-6)
+        z = np.array([0.0, 0.1, 0.5, 1.0])
+        np.testing.assert_array_equal(rate.rate_density(z), np.full(4, 2.5e-6))
+
+    def test_rate_density_shape(self) -> None:
+        """rate_density broadcasts to the shape of z."""
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        result = rate.rate_density(np.linspace(0.0, 1.0, 37))
+        self.assertEqual(result.shape, (37,))
+
+
+# ---------------------------------------------------------------------------
+# expected_n_mergers
+# ---------------------------------------------------------------------------
+
+
+class TestExpectedNMergers(unittest.TestCase):
+    """Tests for the rate -> expected-count integral."""
+
+    def test_scales_linearly_with_rate(self) -> None:
+        """Doubling the rate density doubles the expected count."""
+        structure = PointProcess(z_max=0.5)
+        n1 = expected_n_mergers(
+            structure,
+            Planck18,
+            ConstantMergerRate(rate_density_value=1e-6),
+            t_start=0.0,
+            t_end=_ONE_YEAR_SECONDS,
+        )
+        n2 = expected_n_mergers(
+            structure,
+            Planck18,
+            ConstantMergerRate(rate_density_value=2e-6),
+            t_start=0.0,
+            t_end=_ONE_YEAR_SECONDS,
+        )
+        self.assertAlmostEqual(n2, 2.0 * n1, places=6)
+
+    def test_scales_linearly_with_observation_time(self) -> None:
+        """Doubling the observation window doubles the expected count."""
+        structure = PointProcess(z_max=0.5)
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        n1 = expected_n_mergers(
+            structure, Planck18, rate, t_start=0.0, t_end=_ONE_YEAR_SECONDS
+        )
+        n2 = expected_n_mergers(
+            structure, Planck18, rate, t_start=0.0, t_end=2.0 * _ONE_YEAR_SECONDS
+        )
+        self.assertAlmostEqual(n2, 2.0 * n1, places=6)
+
+    def test_scales_with_sky_fraction(self) -> None:
+        """A quarter-sky tile gives a quarter the expected count of full sky."""
+        base = PointProcess(z_max=0.5)
+        tile = SkyPatch(base, ra_range=(0.0, np.pi), sin_dec_range=(0.0, 1.0))
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        n_full = expected_n_mergers(
+            base, Planck18, rate, t_start=0.0, t_end=_ONE_YEAR_SECONDS
+        )
+        n_tile = expected_n_mergers(
+            tile, Planck18, rate, t_start=0.0, t_end=_ONE_YEAR_SECONDS
+        )
+        self.assertAlmostEqual(n_tile, 0.25 * n_full, places=6)
+
+    def test_less_than_naive_volume_times_rate(self) -> None:
+        """The 1/(1+z) time-dilation factor makes the count less than a naive estimate.
+
+        A naive (non-time-dilated) estimate would be
+        ``rate_density * survey_volume * t_obs_years``. The true
+        detector-frame count is strictly smaller because every shell's
+        contribution is suppressed by 1/(1+z) for z > 0.
+        """
+        structure = PointProcess(z_max=1.0)
+        rate_value = 1e-6
+        rate = ConstantMergerRate(rate_density_value=rate_value)
+        n = expected_n_mergers(
+            structure, Planck18, rate, t_start=0.0, t_end=_ONE_YEAR_SECONDS
+        )
+        naive = rate_value * structure.survey_volume(Planck18) * 1.0  # t_obs = 1 year
+        self.assertLess(n, naive)
+
+    def test_zero_at_zero_observation_time(self) -> None:
+        """No observation time means no expected events."""
+        structure = PointProcess(z_max=0.5)
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        n = expected_n_mergers(structure, Planck18, rate, t_start=0.0, t_end=0.0)
+        self.assertEqual(n, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# sample_merger_redshifts
+# ---------------------------------------------------------------------------
+
+
+class TestSampleMergerRedshifts(unittest.TestCase):
+    """Tests for the rate-weighted redshift sampler."""
+
+    def test_shape(self) -> None:
+        """Returns an array of the requested length."""
+        structure = PointProcess(z_max=1.0)
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        z = sample_merger_redshifts(
+            structure, Planck18, rate, 500, rng=np.random.default_rng(0)
+        )
+        self.assertEqual(z.shape, (500,))
+
+    def test_bounds(self) -> None:
+        """All sampled redshifts lie in [0, z_max]."""
+        structure = PointProcess(z_max=0.4)
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        z = sample_merger_redshifts(
+            structure, Planck18, rate, 2000, rng=np.random.default_rng(1)
+        )
+        self.assertGreaterEqual(float(z.min()), 0.0)
+        self.assertLessEqual(float(z.max()), 0.4)
+
+    def test_reproducible(self) -> None:
+        """Same seed produces identical output."""
+        structure = PointProcess(z_max=1.0)
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        z1 = sample_merger_redshifts(
+            structure, Planck18, rate, 200, rng=np.random.default_rng(7)
+        )
+        z2 = sample_merger_redshifts(
+            structure, Planck18, rate, 200, rng=np.random.default_rng(7)
+        )
+        np.testing.assert_array_equal(z1, z2)
+
+    def test_default_rng(self) -> None:
+        """Works when rng=None."""
+        structure = PointProcess(z_max=1.0)
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        z = sample_merger_redshifts(structure, Planck18, rate, 10, rng=None)
+        self.assertEqual(z.shape, (10,))
+
+    def test_skewed_low_relative_to_unweighted(self) -> None:
+        """Time dilation skews the rate-weighted mean redshift lower.
+
+        Relative to the unweighted (uniform-in-comoving-volume) galaxy
+        redshift distribution, the 1/(1+z) time-dilation weighting shifts
+        probability mass toward lower z.
+        """
+        structure = PointProcess(z_max=1.0)
+        rate = ConstantMergerRate(rate_density_value=1e-6)
+        z_weighted = sample_merger_redshifts(
+            structure, Planck18, rate, 100_000, rng=np.random.default_rng(3)
+        )
+        z_unweighted = structure.sample_redshifts(
+            100_000, Planck18, rng=np.random.default_rng(4)
+        )
+        self.assertLess(float(z_weighted.mean()), float(z_unweighted.mean()))
