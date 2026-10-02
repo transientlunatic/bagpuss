@@ -226,6 +226,13 @@ class MDCConfig:
                 "n_ra_tiles and n_dec_tiles must both be >= 1, got "
                 f"n_ra_tiles={self.n_ra_tiles!r}, n_dec_tiles={self.n_dec_tiles!r}"
             )
+        if self.trigger_eta_max is not None and not (
+            0.0 < self.trigger_eta_max <= 0.25
+        ):
+            raise ValueError(
+                "trigger_eta_max must be in (0, 0.25] (the symmetric mass ratio "
+                f"is at most 0.25), got {self.trigger_eta_max!r}"
+            )
         if self.n_injection_shards < 1:
             raise ValueError(
                 f"n_injection_shards must be >= 1, got {self.n_injection_shards!r}"

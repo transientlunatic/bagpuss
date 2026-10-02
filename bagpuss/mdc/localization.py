@@ -125,8 +125,12 @@ class BayestarLocalizer:
         )
 
     @staticmethod
-    def _write_injection_table(event: dict[str, Any], path: Path) -> None:
-        """Write a one-row ``sim_inspiral`` table, as ``lalapps_inspinj`` would."""
+    def _write_injection_table(event: dict[str, Any], path: Path, f_low: float) -> None:
+        """Write a one-row ``sim_inspiral`` table, as ``lalapps_inspinj`` would.
+
+        *f_low* is the low-frequency cutoff recorded for the injection, so that
+        every BAYESTAR step uses the same value.
+        """
         from igwn_ligolw import ligolw, lsctables
         from igwn_ligolw import utils as ligolw_utils
         from igwn_ligolw.utils import process as ligolw_process
@@ -155,7 +159,7 @@ class BayestarLocalizer:
         row.coa_phase = 0.0
         row.geocent_end_time = int(np.floor(gps))
         row.geocent_end_time_ns = int(round((gps - np.floor(gps)) * 1e9))
-        row.f_lower = 20.0
+        row.f_lower = f_low
         row.waveform = "IMRPhenomPv2"
         row.simulation_id = 0
         row.process_id = process.process_id
@@ -181,7 +185,7 @@ class BayestarLocalizer:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 work = Path(tmp)
-                self._write_injection_table(event, work / "sim.xml")
+                self._write_injection_table(event, work / "sim.xml", self.f_low)
 
                 psd_args: list[str] = []
                 for ifo in ifos:

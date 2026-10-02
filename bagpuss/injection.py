@@ -398,7 +398,9 @@ def sample_host_galaxies(
 
     host_galaxy_index = np.full(n, -1, dtype=int)
     n_observed = int(host_observed.sum())
-    if n_observed > 0:
+    # With an empty catalogue nothing can be catalogued: events flagged as
+    # observed keep their trial (uncatalogued) position.
+    if n_observed > 0 and n_cat > 0:
         cat_idx = rng.integers(0, n_cat, size=n_observed)
         redshift[host_observed] = catalogue.redshifts[cat_idx]
         ra[host_observed] = catalogue.ra[cat_idx]

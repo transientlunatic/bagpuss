@@ -114,6 +114,23 @@ class TestBayestarLocalizer(unittest.TestCase):
         localize = rec.calls[2]
         self.assertEqual(localize[localize.index("--waveform") + 1], "IMRPhenomD")
 
+    def test_f_low_reaches_injection_table_and_tools(self) -> None:
+        """The injection table and every BAYESTAR step use the configured cutoff."""
+        rec = _Recorder()
+        with tempfile.TemporaryDirectory() as tmp:
+            localizer = BayestarLocalizer(f_low=30.0, bin_dir=Path("/opt/bin"))
+            with (
+                mock.patch.object(BayestarLocalizer, "_write_injection_table") as table,
+                mock.patch("subprocess.run", rec),
+            ):
+                localizer.localize(
+                    _EVENT, _OBSERVING, _PSDS, 7, Path(tmp) / "sky" / "e.fits"
+                )
+        self.assertEqual(table.call_args.args[2], 30.0)
+        realize, localize = rec.calls[1], rec.calls[2]
+        self.assertEqual(realize[realize.index("--f-low") + 1], "30.0")
+        self.assertEqual(localize[localize.index("--f-low") + 1], "30.0")
+
     def test_skymap_moved_to_output_path(self) -> None:
         """The FITS file ends up at the requested path."""
         result, text = self._localize(_Recorder())

@@ -48,6 +48,18 @@ def _cap_eta(m1: float, m2: float, eta_max: float | None) -> tuple[float, float]
     return total / 2.0 * (1.0 + half_gap), total / 2.0 * (1.0 - half_gap)
 
 
+def _duty_cycle() -> Any:  # noqa: ANN401
+    """Import ``minke.duty_cycle``, explaining what is needed if it is missing."""
+    try:
+        from minke import duty_cycle
+    except ImportError as exc:
+        raise ImportError(
+            "the detection stage needs minke.duty_cycle, which is in minke releases "
+            "after 2.2.1 (not in 2.2.1 itself); install a newer minke"
+        ) from exc
+    return duty_cycle
+
+
 class DetectionBackend(Protocol):
     """What the detection stage needs from a waveform/frame engine."""
 
@@ -152,9 +164,7 @@ class MinkeBackend:
         rng: np.random.Generator,
     ) -> dict[str, Any]:
         """Draw one duty-cycle schedule per configured detector."""
-        from minke.duty_cycle import (
-            generate_duty_cycle_schedule,
-        )
+        generate_duty_cycle_schedule = _duty_cycle().generate_duty_cycle_schedule
 
         return {
             name: generate_duty_cycle_schedule(
@@ -171,11 +181,7 @@ class MinkeBackend:
         self, schedules: dict[str, Any], detectors: dict[str, str], t: float
     ) -> dict[str, str]:
         """Restrict *detectors* to those locked at GPS time *t*."""
-        from minke.duty_cycle import (
-            active_detectors,
-        )
-
-        return dict(active_detectors(schedules, detectors, t))
+        return dict(_duty_cycle().active_detectors(schedules, detectors, t))
 
     def inject(
         self,

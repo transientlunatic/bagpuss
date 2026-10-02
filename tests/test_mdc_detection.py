@@ -108,6 +108,20 @@ def _fake_blueprint_minke() -> dict[str, types.ModuleType]:
     }
 
 
+class TestMissingDutyCycle(unittest.TestCase):
+    """minke 2.2.1 has no duty_cycle module; the error should say what to do."""
+
+    def test_clear_error(self) -> None:
+        """A minke without minke.duty_cycle gives an actionable ImportError."""
+        with mock.patch.dict(sys.modules, {"minke": types.ModuleType("minke")}):
+            sys.modules.pop("minke.duty_cycle", None)
+            with self.assertRaises(ImportError) as ctx:
+                MinkeBackend().duty_schedules(
+                    MDCConfig(), 0.0, 1.0, np.random.default_rng(0)
+                )
+        self.assertIn("after 2.2.1", str(ctx.exception))
+
+
 class TestCapEta(unittest.TestCase):
     """Capping the trigger's symmetric mass ratio, holding the chirp mass fixed."""
 

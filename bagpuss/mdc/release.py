@@ -46,13 +46,18 @@ import numpy as np
 import yaml
 
 import bagpuss
-from bagpuss.injection import _INJECTION_FIELDS, InjectionSet
+from bagpuss.catalogue import GalaxyCatalogue
+from bagpuss.injection import (
+    _INJECTION_FIELDS,
+    GPS_O3_END,
+    GPS_O3_START,
+    InjectionSet,
+)
 from bagpuss.mdc.config import MDCConfig
 from bagpuss.mdc.pipeline import (
     MDCValidationError,
     _open_store,
     export_glade_catalogue,
-    load_consolidated_catalogue,
 )
 
 __all__: list[str] = ["build_release", "verify_release"]
@@ -97,36 +102,69 @@ def _event_name(gps: float) -> str:
 
 
 def _write_catalogue(config: MDCConfig, path: Path) -> dict[str, Any]:
-    """Write ``catalogue.h5`` and return its summary."""
+    """Write ``catalogue.h5``, one tile at a time, and return its summary.
+
+    Tiles are streamed into pre-sized, chunked datasets, so memory use is set
+    by the largest tile rather than the whole catalogue.
+    """
     root = _open_store(config, mode="r")
-    index = cast(list[dict[str, Any]], root.require_group("catalogue").attrs["_index"])
-    catalogue = load_consolidated_catalogue(config)
-    tile_id = np.concatenate(
-        [np.full(row["n_galaxies"], row["tile_id"], dtype=np.int16) for row in index]
-        or [np.array([], dtype=np.int16)]
-    )
-    fields = {
-        "ra": (catalogue.ra, "radians"),
-        "dec": (catalogue.dec, "radians"),
-        "redshift": (catalogue.redshifts, "dimensionless"),
-        "luminosity": (catalogue.luminosities, "solar luminosities"),
-        "apparent_magnitude": (catalogue.apparent_magnitudes, "mag (survey band)"),
-        "tile_id": (tile_id, "sky tile the galaxy was drawn in"),
+    group = root.require_group("catalogue")
+    index = cast(list[dict[str, Any]], group.attrs["_index"])
+    n = int(cast(int, group.attrs["_total_galaxies"]))
+    if sum(row["n_galaxies"] for row in index) != n:
+        raise MDCValidationError(
+            {"issues": ["the catalogue index does not add up to _total_galaxies"]}
+        )
+
+    specs: dict[str, tuple[type, str]] = {
+        "ra": (np.float64, "radians"),
+        "dec": (np.float64, "radians"),
+        "redshift": (np.float64, "dimensionless"),
+        "luminosity": (np.float64, "solar luminosities"),
+        "apparent_magnitude": (np.float64, "mag (survey band)"),
+        "tile_id": (np.int16, "sky tile the galaxy was drawn in"),
     }
-    n = len(catalogue)
+    options: dict[str, Any] = (
+        {
+            "chunks": (min(_CHUNK_ROWS, n),),
+            "compression": "gzip",
+            "compression_opts": 4,
+            "shuffle": True,
+        }
+        if n
+        else {}
+    )
     with h5py.File(path, "w") as fh:
         grp = fh.create_group("catalogue")
-        for name, (values, unit) in fields.items():
-            chunks = (min(_CHUNK_ROWS, n),) if n else None
-            ds = grp.create_dataset(
-                name,
-                data=values,
-                chunks=chunks,
-                compression="gzip",
-                compression_opts=4,
-                shuffle=True,
+        datasets: dict[str, h5py.Dataset] = {}
+        for name, (dtype, unit) in specs.items():
+            datasets[name] = grp.create_dataset(
+                name, shape=(n,), dtype=dtype, **options
             )
-            ds.attrs["unit"] = unit
+            datasets[name].attrs["unit"] = unit
+        offset = 0
+        for row in index:
+            tile = GalaxyCatalogue.from_zarr(
+                group.require_group(f"tile_{row['tile_id']:04d}")
+            )
+            m = len(tile)
+            if m != row["n_galaxies"]:
+                raise MDCValidationError(
+                    {
+                        "issues": [
+                            f"tile {row['tile_id']} has {m} rows, "
+                            f"index says {row['n_galaxies']}"
+                        ]
+                    }
+                )
+            rows = slice(offset, offset + m)
+            datasets["ra"][rows] = tile.ra
+            datasets["dec"][rows] = tile.dec
+            datasets["redshift"][rows] = tile.redshifts
+            datasets["luminosity"][rows] = tile.luminosities
+            datasets["apparent_magnitude"][rows] = tile.apparent_magnitudes
+            datasets["tile_id"][rows] = row["tile_id"]
+            offset += m
         grp.attrs["n_galaxies"] = n
         grp.attrs["row_order"] = (
             "tile order; row i is the galaxy that injections.h5 host_galaxy_index == i "
@@ -227,14 +265,50 @@ def _pack_skymaps(
 
 
 def _write_events(
-    config: MDCConfig, names: np.ndarray, skymap_paths: np.ndarray, path: Path
+    config: MDCConfig,
+    names: np.ndarray,
+    detectable: np.ndarray,
+    skymap_paths: np.ndarray,
+    path: Path,
 ) -> int:
-    """Write ``events.yaml`` (blueprints with skymap paths made relative)."""
+    """Write ``events.yaml`` (blueprints with skymap paths made relative).
+
+    The blueprints must be exactly those of the detectable events: a missing or
+    stale ``blueprints.yaml`` would otherwise give a release that claims events
+    it does not describe.
+    """
+    expected = {str(n) for n, d in zip(names, detectable, strict=True) if d}
     source = Path(config.output_dir) / "blueprints.yaml"
     if not source.exists():
+        if expected:
+            raise MDCValidationError(
+                {
+                    "issues": [
+                        f"{source} not found, but {len(expected)} events are detectable"
+                    ]
+                }
+            )
         return 0
-    relative = {str(n): str(p) for n, p in zip(names, skymap_paths, strict=True) if p}
     documents = [d for d in yaml.safe_load_all(source.read_text()) if d]
+    got = [str(d["name"]) for d in documents]
+    issues: list[str] = []
+    if len(got) != len(set(got)):
+        issues.append("blueprints.yaml has duplicate event names")
+    missing, extra = expected - set(got), set(got) - expected
+    if missing:
+        issues.append(
+            f"blueprints.yaml lacks {len(missing)} detectable events, "
+            f"e.g. {sorted(missing)[0]}"
+        )
+    if extra:
+        issues.append(
+            f"blueprints.yaml has {len(extra)} events that are not detectable, "
+            f"e.g. {sorted(extra)[0]}"
+        )
+    if issues:
+        raise MDCValidationError({"issues": issues})
+
+    relative = {str(n): str(p) for n, p in zip(names, skymap_paths, strict=True) if p}
     for doc in documents:
         if "localization file" in doc:
             if doc["name"] not in relative:
@@ -268,8 +342,8 @@ def _readme(
         if config.trigger_eta_max is not None
         else "The trigger holds the injected parameters."
     )
-    t0 = config.t_start
-    t1 = config.t_end
+    t0 = GPS_O3_START if config.t_start is None else config.t_start
+    t1 = GPS_O3_END if config.t_end is None else config.t_end
     return f"""# {title}
 
 Version {version}. Generated with bagpuss {bagpuss.__version__}.
@@ -416,7 +490,10 @@ def build_release(
     sky_dir = Path(skymap_dir) if skymap_dir else Path(config.output_dir) / "skymaps"
     skymap_files = _pack_skymaps(config, data, names, sky_dir, out / "skymaps.tar")
     _write_injections(data, detector_names, names, skymap_files, out / "injections.h5")
-    n_events = _write_events(config, names, skymap_files, out / "events.yaml")
+    detectable = data.get("detectable", np.zeros(len(names), dtype=bool))
+    n_events = _write_events(
+        config, names, detectable, skymap_files, out / "events.yaml"
+    )
 
     if config_path is not None:
         text = Path(config_path).read_text()
@@ -519,36 +596,10 @@ def _write_manifest(
     return manifest
 
 
-def verify_release(out_dir: str | Path) -> dict[str, Any]:
-    """Check a release directory against its own manifest.
-
-    Verifies every checksum in ``SHA256SUMS``, that the dataset row counts match
-    ``MANIFEST.json``, that every catalogued host's sky position and redshift in
-    ``injections.h5`` agree with its row of ``catalogue.h5``, and that
-    ``skymaps.tar`` holds exactly the skymaps the injection table names.
-
-    Parameters
-    ----------
-    out_dir : str or pathlib.Path
-        A directory written by :func:`build_release`.
-
-    Returns
-    -------
-    dict
-        ``{"ok": bool, "issues": [...]}``.
-    """
-    out = Path(out_dir)
-    issues: list[str] = []
-    manifest = json.loads((out / "MANIFEST.json").read_text())
-    counts = manifest["counts"]
-
-    for line in (out / "SHA256SUMS").read_text().splitlines():
-        digest, _, fname = line.partition("  ")
-        if not (out / fname).exists():
-            issues.append(f"missing file: {fname}")
-        elif _sha256(out / fname) != digest:
-            issues.append(f"checksum mismatch: {fname}")
-
+def _check_tables(
+    out: Path, counts: dict[str, Any], issues: list[str]
+) -> tuple[set[str], set[str]]:
+    """Check the HDF5 tables; return the skymap files and detectable events named."""
     with (
         h5py.File(out / "catalogue.h5", "r") as cat,
         h5py.File(out / "injections.h5", "r") as inj,
@@ -573,34 +624,107 @@ def verify_release(out_dir: str | Path) -> dict[str, Any]:
             else:
                 order = np.argsort(rows)
                 rows_sorted = rows[order]
-                for field, cat_field in (
-                    ("ra", "ra"),
-                    ("dec", "dec"),
-                    ("redshift", "redshift"),
-                ):
-                    expected = _dataset(cat, f"catalogue/{cat_field}")[rows_sorted]
+                for field in ("ra", "dec", "redshift"):
+                    expected = _dataset(cat, f"catalogue/{field}")[rows_sorted]
                     got = _dataset(inj, f"injections/{field}")[hosted][order]
                     if not np.allclose(expected, got):
                         issues.append(f"host {field} disagrees with the catalogue")
 
-        listed = (
-            {
+        listed: set[str] = set()
+        if "injections/skymap_file" in inj:
+            listed = {
                 s.decode() if isinstance(s, bytes) else s
                 for s in _dataset(inj, "injections/skymap_file")[()]
+            } - {""}
+        detectable_names: set[str] = set()
+        if "injections/detectable" in inj:
+            flags = _dataset(inj, "injections/detectable")[()]
+            names = _dataset(inj, "injections/event_name")[()]
+            detectable_names = {
+                s.decode() if isinstance(s, bytes) else str(s) for s in names[flags]
             }
-            - {""}
-            if "injections/skymap_file" in inj
-            else set()
-        )
-    with tarfile.open(out / "skymaps.tar") as tar:
-        members = {m.name for m in tar.getmembers() if m.isfile()}
-    if members != listed:
-        issues.append(
-            f"skymaps.tar has {len(members)} files, injection table names {len(listed)}"
-        )
-    if len(members) != counts["n_skymaps"]:
-        issues.append(
-            f"skymaps.tar has {len(members)} files, manifest says {counts['n_skymaps']}"
-        )
+    return listed, detectable_names
+
+
+def verify_release(out_dir: str | Path) -> dict[str, Any]:
+    """Check a release directory against its own manifest.
+
+    Verifies every checksum in ``SHA256SUMS``, that the dataset row counts match
+    ``MANIFEST.json``, that every catalogued host's sky position and redshift in
+    ``injections.h5`` agree with its row of ``catalogue.h5``, that ``events.yaml``
+    describes exactly the detectable events, and that ``skymaps.tar`` holds
+    exactly the skymaps the injection table names.
+
+    Damaged or unreadable files are reported as issues rather than raised.
+
+    Parameters
+    ----------
+    out_dir : str or pathlib.Path
+        A directory written by :func:`build_release`.
+
+    Returns
+    -------
+    dict
+        ``{"ok": bool, "issues": [...]}``.
+    """
+    out = Path(out_dir)
+    issues: list[str] = []
+    try:
+        manifest = json.loads((out / "MANIFEST.json").read_text())
+        sums = (out / "SHA256SUMS").read_text().splitlines()
+    except (OSError, ValueError) as exc:
+        return {
+            "ok": False,
+            "issues": [f"cannot read the manifest or checksums: {exc}"],
+        }
+    counts = manifest["counts"]
+
+    for line in sums:
+        digest, _, fname = line.partition("  ")
+        if not (out / fname).exists():
+            issues.append(f"missing file: {fname}")
+        elif _sha256(out / fname) != digest:
+            issues.append(f"checksum mismatch: {fname}")
+
+    listed: set[str] | None = None
+    detectable_names: set[str] | None = None
+    try:
+        listed, detectable_names = _check_tables(out, counts, issues)
+    except (OSError, KeyError) as exc:
+        issues.append(f"cannot read the HDF5 tables: {exc}")
+
+    try:
+        with tarfile.open(out / "skymaps.tar") as tar:
+            members = {m.name for m in tar.getmembers() if m.isfile()}
+    except (tarfile.TarError, OSError) as exc:
+        issues.append(f"cannot read skymaps.tar: {exc}")
+    else:
+        if listed is not None and members != listed:
+            issues.append(
+                f"skymaps.tar has {len(members)} files, "
+                f"injection table names {len(listed)}"
+            )
+        if len(members) != counts["n_skymaps"]:
+            issues.append(
+                f"skymaps.tar has {len(members)} files, "
+                f"manifest says {counts['n_skymaps']}"
+            )
+
+    events = out / "events.yaml"
+    if events.exists() and detectable_names is not None:
+        try:
+            event_names = [
+                d["name"] for d in yaml.safe_load_all(events.read_text()) if d
+            ]
+        except (yaml.YAMLError, OSError, KeyError, TypeError) as exc:
+            issues.append(f"cannot read events.yaml: {exc}")
+        else:
+            if len(event_names) != len(set(event_names)):
+                issues.append("events.yaml has duplicate event names")
+            if set(event_names) != detectable_names:
+                issues.append(
+                    f"events.yaml describes {len(set(event_names))} events, but "
+                    f"{len(detectable_names)} are detectable (or the names differ)"
+                )
 
     return {"ok": not issues, "issues": issues}

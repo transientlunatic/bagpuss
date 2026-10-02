@@ -268,3 +268,22 @@ class TestSchemaCompleteness(unittest.TestCase):
             len(leaves), len(set(leaves)), "a field is reachable via >1 schema key"
         )
         self.assertEqual(field_names, set(leaves))
+
+
+class TestTriggerEtaMax(unittest.TestCase):
+    """trigger_eta_max must be a physical symmetric mass ratio."""
+
+    def test_default_is_none(self) -> None:
+        """No cap unless asked for."""
+        self.assertIsNone(MDCConfig().trigger_eta_max)
+
+    def test_valid_values_accepted(self) -> None:
+        """Anything in (0, 0.25] is a valid cap."""
+        for value in (0.249, 0.2, 0.25, 0.01):
+            self.assertEqual(MDCConfig(trigger_eta_max=value).trigger_eta_max, value)
+
+    def test_out_of_range_rejected(self) -> None:
+        """Zero, negative and above-0.25 values are rejected at construction."""
+        for value in (0.0, -0.1, 0.26, 1.0):
+            with self.assertRaises(ValueError, msg=str(value)):
+                MDCConfig(trigger_eta_max=value)

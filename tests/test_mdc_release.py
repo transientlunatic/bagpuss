@@ -16,7 +16,7 @@ import yaml
 from click.testing import CliRunner
 
 from bagpuss.cli import main
-from bagpuss.injection import InjectionSet
+from bagpuss.injection import GPS_O3_END, GPS_O3_START, InjectionSet
 from bagpuss.mdc.config import MDCConfig
 from bagpuss.mdc.pipeline import (
     MDCValidationError,
@@ -26,8 +26,9 @@ from bagpuss.mdc.pipeline import (
     detect_injection_shard,
     generate_catalogue_tile,
     generate_injection_shard,
+    load_consolidated_catalogue,
 )
-from bagpuss.mdc.release import build_release, verify_release
+from bagpuss.mdc.release import _sha256, build_release, verify_release
 from tests.test_mdc_pipeline import _FakeBackend, _FakeLocalizer, _tiny_config
 
 
@@ -157,6 +158,26 @@ class TestBuildRelease(unittest.TestCase):
             self.assertFalse(Path(doc["localization file"]).is_absolute())
             self.assertIn(doc["localization file"], members)
 
+    def test_catalogue_streamed_identically(self) -> None:
+        """Writing tile by tile gives exactly the concatenated catalogue."""
+        catalogue = load_consolidated_catalogue(self.cfg)
+        with h5py.File(self.out / "catalogue.h5", "r") as fh:
+            grp = fh["catalogue"]
+            np.testing.assert_array_equal(grp["ra"][()], catalogue.ra)
+            np.testing.assert_array_equal(grp["dec"][()], catalogue.dec)
+            np.testing.assert_array_equal(grp["redshift"][()], catalogue.redshifts)
+            np.testing.assert_array_equal(grp["luminosity"][()], catalogue.luminosities)
+            np.testing.assert_array_equal(
+                grp["apparent_magnitude"][()], catalogue.apparent_magnitudes
+            )
+
+    def test_readme_resolves_default_observation_window(self) -> None:
+        """A config with no explicit window documents the O3 default, not None."""
+        self.assertIsNone(self.cfg.t_start)
+        readme = (self.out / "README.md").read_text()
+        self.assertNotIn("None", readme)
+        self.assertIn(f"GPS {GPS_O3_START} to {GPS_O3_END}", readme)
+
     def test_zenodo_metadata(self) -> None:
         """The upload metadata has the fields Zenodo requires."""
         meta = json.loads((self.out / "zenodo_metadata.json").read_text())
@@ -224,6 +245,66 @@ class TestReleaseIntegrity(unittest.TestCase):
         self.assertTrue(
             any("disagrees with the catalogue" in i for i in report["issues"])
         )
+
+    def _rewrite_events(self, keep: int) -> None:
+        """Truncate events.yaml and refresh its checksum, as a stale file would be."""
+        path = self.out / "events.yaml"
+        docs = [d for d in yaml.safe_load_all(path.read_text()) if d]
+        with open(path, "w") as fh:
+            yaml.safe_dump_all(docs[:keep], fh, sort_keys=False)
+        lines = (self.out / "SHA256SUMS").read_text().splitlines()
+        fixed = [
+            f"{_sha256(path)}  events.yaml" if line.endswith("  events.yaml") else line
+            for line in lines
+        ]
+        (self.out / "SHA256SUMS").write_text("\n".join(fixed) + "\n")
+
+    def test_verify_flags_events_that_are_not_the_detectable_ones(self) -> None:
+        """An events.yaml missing a detectable event fails the semantic check."""
+        self._rewrite_events(keep=1)
+        report = verify_release(self.out)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("events.yaml describes" in i for i in report["issues"]))
+
+    def test_build_rejects_stale_blueprints(self) -> None:
+        """A blueprints.yaml that omits a detectable event cannot be released."""
+        path = Path(self.cfg.output_dir) / "blueprints.yaml"
+        docs = [d for d in yaml.safe_load_all(path.read_text()) if d]
+        with open(path, "w") as fh:
+            yaml.safe_dump_all(docs[:-1], fh, sort_keys=False)
+        with self.assertRaises(MDCValidationError) as ctx:
+            build_release(self.cfg, self.out, overwrite=True)
+        self.assertTrue(
+            any("lacks" in i for i in ctx.exception.report["issues"]), ctx.exception
+        )
+
+    def test_build_rejects_missing_blueprints(self) -> None:
+        """Detectable events with no blueprints file at all cannot be released."""
+        (Path(self.cfg.output_dir) / "blueprints.yaml").unlink()
+        with self.assertRaises(MDCValidationError):
+            build_release(self.cfg, self.out, overwrite=True)
+
+    def test_malformed_tar_is_reported_not_raised(self) -> None:
+        """A truncated skymaps.tar is exactly what verification must diagnose."""
+        (self.out / "skymaps.tar").write_bytes(b"not a tar")
+        report = verify_release(self.out)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("cannot read skymaps.tar" in i for i in report["issues"]))
+
+    def test_unreadable_hdf5_is_reported_not_raised(self) -> None:
+        """A corrupt HDF5 table is reported as an issue."""
+        (self.out / "injections.h5").write_bytes(b"garbage")
+        report = verify_release(self.out)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("cannot read the HDF5 tables" in i for i in report["issues"])
+        )
+
+    def test_missing_manifest_is_reported_not_raised(self) -> None:
+        """A directory with no manifest fails cleanly."""
+        (self.out / "MANIFEST.json").unlink()
+        report = verify_release(self.out)
+        self.assertFalse(report["ok"])
 
     def test_refuses_non_empty_directory(self) -> None:
         """An existing release is not overwritten by accident."""

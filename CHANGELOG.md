@@ -24,6 +24,23 @@
   `sample_observed_redshifts`), and `sample_brighter_than`,
   `differential_comoving_volume` and `z_max` on luminosity models and universes.
 
+### Changed
+- **Breaking:** `create_injection_set` now takes `universe`, `catalogue`,
+  `selection`, `population` and `n_draw` (previously `catalogue`, `population`,
+  `cosmology`, `n_draw`). Host galaxies are assigned in two steps: a trial host
+  from the universe, then a catalogue row if the survey completeness says the
+  host would be catalogued (`host_galaxy_index == -1` otherwise); it is no
+  longer drawn uniformly from the catalogue. `docs/injection.rst` is updated.
+
+### Fixed
+- `sample_host_galaxies` no longer fails on an empty catalogue.
+- `MDCConfig.trigger_eta_max` is validated to lie in (0, 0.25].
+- `export-release` / `verify-release`: the catalogue is written tile by tile
+  (no full in-memory concatenation); `events.yaml` is checked against the
+  detectable events; a damaged skymaps tar or HDF5 file is reported rather
+  than raised; the README resolves the default observation window.
+- BAYESTAR skymaps use the configured low-frequency cutoff throughout.
+
 ### Notes
-- The detection stage imports `minke.duty_cycle`, which is not in a released
-  minke yet (minke PR #25).
+- The detection stage imports `minke.duty_cycle`, which is in minke releases
+  after 2.2.1 (not 2.2.1 itself); the `detection` extra requires `minke>2.2.1`.

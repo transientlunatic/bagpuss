@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import zarr
@@ -353,6 +354,29 @@ class TestSampleHostGalaxies(unittest.TestCase):
             rng=np.random.default_rng(0),
         )
         self.assertEqual(len(result), 15)
+
+    def test_empty_catalogue_leaves_all_hosts_uncatalogued(self) -> None:
+        """An empty catalogue cannot host anything, even if completeness says so."""
+        empty = GalaxyCatalogue(
+            redshifts=np.array([]),
+            luminosities=np.array([]),
+            apparent_magnitudes=np.array([]),
+            ra=np.array([]),
+            dec=np.array([]),
+        )
+        selection = _make_selection()
+        with mock.patch.object(
+            selection, "completeness", side_effect=lambda z, *a, **k: np.ones_like(z)
+        ):
+            result = sample_host_galaxies(
+                universe=_make_universe(),
+                catalogue=empty,
+                selection=selection,
+                n=20,
+                rng=np.random.default_rng(0),
+            )
+        self.assertEqual(len(result), 20)
+        self.assertTrue(np.all(result.host_galaxy_index == -1))
 
     def test_host_galaxy_index_valid_when_observed(self) -> None:
         """Observed-host indices are valid indices into the catalogue."""
