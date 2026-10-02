@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 0.2.0
 
 ### Added
 - `bagpuss.mdc`: config-driven, sharded generation of large catalogues and
