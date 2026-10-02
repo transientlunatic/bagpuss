@@ -192,3 +192,71 @@ class TestSchechterLuminosityModelCdf(unittest.TestCase):
         empirical = float(np.mean(sample >= l_threshold))
         expected = float(model.cdf(np.array([magnitude_threshold]))[0])
         self.assertAlmostEqual(empirical, expected, delta=0.01)
+
+
+class TestSchechterLuminosityModelSampleBrighterThan(unittest.TestCase):
+    """Tests for SchechterLuminosityModel.sample_brighter_than."""
+
+    def test_shape(self) -> None:
+        """Returns an array of the requested length."""
+        model = _make()
+        threshold = np.full(500, _M_STAR)
+        result = model.sample_brighter_than(
+            500, threshold, rng=np.random.default_rng(0)
+        )
+        self.assertEqual(result.shape, (500,))
+
+    def test_respects_per_galaxy_threshold(self) -> None:
+        """Every drawn luminosity's implied magnitude is <= its own threshold."""
+        model = _make()
+        rng = np.random.default_rng(1)
+        # A range of thresholds, all within [m_min, m_max].
+        threshold = rng.uniform(_M_MIN, _M_MAX, size=2000)
+        result = model.sample_brighter_than(2000, threshold, rng=rng)
+        implied_magnitude = model.m_sun - 2.5 * np.log10(result)
+        self.assertTrue(np.all(implied_magnitude <= threshold + 1e-9))
+
+    def test_reproducible(self) -> None:
+        """Same RNG seed produces identical output."""
+        model = _make()
+        threshold = np.full(200, _M_STAR)
+        r1 = model.sample_brighter_than(200, threshold, rng=np.random.default_rng(42))
+        r2 = model.sample_brighter_than(200, threshold, rng=np.random.default_rng(42))
+        np.testing.assert_array_equal(r1, r2)
+
+    def test_default_rng(self) -> None:
+        """Works when rng=None (uses internal default)."""
+        model = _make()
+        result = model.sample_brighter_than(10, np.full(10, _M_STAR), rng=None)
+        self.assertEqual(result.shape, (10,))
+
+    def test_matches_truncated_cdf_statistically(self) -> None:
+        """Empirical fraction below a sub-threshold matches the analytic CDF.
+
+        Compares against the truncated CDF ratio cdf(M') / cdf(threshold).
+        """
+        model = _make()
+        threshold = _M_STAR
+        sub_threshold = _M_STAR - 1.0  # brighter than threshold
+        sample = model.sample_brighter_than(
+            200_000, np.full(200_000, threshold), rng=np.random.default_rng(3)
+        )
+        l_sub = 10.0 ** (0.4 * (model.m_sun - sub_threshold))
+        empirical = float(np.mean(sample >= l_sub))
+        expected = float(model.cdf(np.array([sub_threshold]))[0]) / float(
+            model.cdf(np.array([threshold]))[0]
+        )
+        self.assertAlmostEqual(empirical, expected, delta=0.01)
+
+    def test_threshold_at_m_max_matches_unconditional_sample(self) -> None:
+        """A threshold at m_max (cdf=1) is statistically equivalent to sample()."""
+        model = _make()
+        unconditional = model.sample(200_000, rng=np.random.default_rng(5))
+        conditional = model.sample_brighter_than(
+            200_000, np.full(200_000, _M_MAX), rng=np.random.default_rng(6)
+        )
+        self.assertAlmostEqual(
+            float(np.mean(unconditional)),
+            float(np.mean(conditional)),
+            delta=0.05 * float(np.mean(unconditional)),
+        )

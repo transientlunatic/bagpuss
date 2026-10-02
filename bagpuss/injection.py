@@ -28,7 +28,13 @@ import zarr
 from astropy.cosmology import FLRW
 
 from bagpuss.catalogue import GalaxyCatalogue, MagnitudeLimitedSurvey
-from bagpuss.population import BBHSet, PopulationModel
+from bagpuss.population import (
+    BBHSet,
+    MergerRate,
+    PopulationModel,
+    expected_n_mergers,
+    sample_merger_redshifts,
+)
 from bagpuss.universe import Universe
 
 __all__: list[str] = [
@@ -39,12 +45,15 @@ __all__: list[str] = [
     "sample_host_galaxies",
     "assemble_injection_set",
     "create_injection_set",
+    "build_injection_set",
+    "GPS_O3_START",
+    "GPS_O3_END",
 ]
 
 #: Default GPS start of O3a (2019-04-01 15:00:00 UTC).
-_GPS_O3_START: float = 1_238_166_018.0
+GPS_O3_START: float = 1_238_166_018.0
 #: Default GPS end of O3b (2020-03-27 17:00:00 UTC).
-_GPS_O3_END: float = 1_269_363_618.0
+GPS_O3_END: float = 1_269_363_618.0
 
 _INJECTION_FIELDS: tuple[str, ...] = (
     "m1_source",
@@ -324,6 +333,7 @@ def sample_host_galaxies(
     selection: MagnitudeLimitedSurvey,
     n: int,
     rng: np.random.Generator | None = None,
+    redshift: np.ndarray | None = None,
 ) -> HostAssignment:
     """Draw host galaxy assignments for ``n`` potential GW events.
 
@@ -347,10 +357,20 @@ def sample_host_galaxies(
         Selection function used to compute the probability that a host at
         a given redshift is bright enough to be in ``catalogue``.
     n : int
-        Number of host assignments to draw.
+        Number of host assignments to draw.  Ignored if ``redshift`` is
+        given, in which case ``len(redshift)`` is used instead.
     rng : numpy.random.Generator or None, optional
         Random number generator.  If *None*, ``numpy.random.default_rng()``
         is used.
+    redshift : numpy.ndarray or None, optional
+        Precomputed trial host redshifts, shape ``(n,)``.  If *None*
+        (the default), redshifts are drawn from
+        ``universe.structure.sample_redshifts`` as usual.  Pass this to
+        substitute a different redshift distribution -- e.g. one weighted
+        by a :class:`~bagpuss.population.MergerRate` via
+        :func:`~bagpuss.population.sample_merger_redshifts`, as
+        :func:`build_injection_set` does -- while still drawing sky
+        positions and evaluating catalogue completeness the usual way.
 
     Returns
     -------
@@ -364,7 +384,11 @@ def sample_host_galaxies(
     cosmology = universe.cosmology
     n_cat = len(catalogue)
 
-    redshift = universe.structure.sample_redshifts(n, cosmology, rng)
+    if redshift is None:
+        redshift = universe.structure.sample_redshifts(n, cosmology, rng)
+    else:
+        redshift = np.array(redshift, dtype=float, copy=True)
+        n = redshift.shape[0]
     ra, dec = universe.structure.sample_positions(n, rng)
 
     completeness = selection.completeness(
@@ -395,8 +419,8 @@ def assemble_injection_set(
     cosmology: FLRW,
     detectable: Detectable | None = None,
     rng: np.random.Generator | None = None,
-    t_start: float = _GPS_O3_START,
-    t_end: float = _GPS_O3_END,
+    t_start: float = GPS_O3_START,
+    t_end: float = GPS_O3_END,
 ) -> InjectionSet:
     """Combine host assignments and BBH parameters into an injection set.
 
@@ -488,8 +512,8 @@ def create_injection_set(
     n_draw: int,
     detectable: Detectable | None = None,
     rng: np.random.Generator | None = None,
-    t_start: float = _GPS_O3_START,
-    t_end: float = _GPS_O3_END,
+    t_start: float = GPS_O3_START,
+    t_end: float = GPS_O3_END,
 ) -> InjectionSet:
     """Create a simulated GW injection set from the full galaxy population.
 
@@ -538,6 +562,88 @@ def create_injection_set(
 
     bbh = population.sample(n_draw, rng)
     hosts = sample_host_galaxies(universe, catalogue, selection, n_draw, rng)
+    return assemble_injection_set(
+        hosts, bbh, universe.cosmology, detectable, rng, t_start, t_end
+    )
+
+
+def build_injection_set(
+    universe: Universe,
+    catalogue: GalaxyCatalogue,
+    selection: MagnitudeLimitedSurvey,
+    population: PopulationModel,
+    rate: MergerRate,
+    detectable: Detectable | None = None,
+    rng: np.random.Generator | None = None,
+    t_start: float = GPS_O3_START,
+    t_end: float = GPS_O3_END,
+) -> InjectionSet:
+    r"""Create a Poisson realisation of the GW injection set from ``rate``.
+
+    Unlike :func:`create_injection_set`, the number of events is not
+    supplied by the caller: it is drawn from a Poisson distribution whose
+    mean is set by ``rate`` (a
+    :class:`~bagpuss.population.MergerRate`), ``universe.structure``'s
+    survey volume, and the observation window
+    ``[t_start, t_end]`` -- see
+    :func:`~bagpuss.population.expected_n_mergers`. Event redshifts are
+    then drawn from the rate-weighted distribution via
+    :func:`~bagpuss.population.sample_merger_redshifts`, rather than the
+    unweighted galaxy distribution used by :func:`sample_host_galaxies`
+    (and hence :func:`create_injection_set`) by default.
+
+    This mirrors :func:`~bagpuss.catalogue.build_catalogue`, which
+    Poisson-realises the galaxy count from
+    ``luminosity.number_density() * structure.survey_volume()`` instead of
+    taking a caller-supplied target count.
+
+    Parameters
+    ----------
+    universe : Universe
+        Simulated universe providing the structure, luminosity, and
+        cosmology used for host assignment.
+    catalogue : GalaxyCatalogue
+        Observed galaxy catalogue.
+    selection : MagnitudeLimitedSurvey
+        Selection function used to compute survey completeness.
+    population : PopulationModel
+        BBH population model used to draw intrinsic parameters.
+    rate : MergerRate
+        Merger-rate density model setting the expected number of events.
+    detectable : Detectable or None, optional
+        Detectability model.  If *None*, every drawn event is kept.
+    rng : numpy.random.Generator or None, optional
+        Random number generator.  If *None*, ``numpy.random.default_rng()``
+        is used.
+    t_start : float, optional
+        Start of the observation window in GPS seconds.  Defaults to the
+        O3 start (2019-04-01).
+    t_end : float, optional
+        End of the observation window in GPS seconds.  Defaults to the O3
+        end (2020-03-27).
+
+    Returns
+    -------
+    InjectionSet
+        The (filtered) set of simulated GW injections.  Its size is a
+        Poisson realisation of the rate-implied expected count, not a
+        caller-chosen target.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n_expected = expected_n_mergers(
+        universe.structure, universe.cosmology, rate, t_start, t_end
+    )
+    n = int(rng.poisson(n_expected))
+
+    redshift = sample_merger_redshifts(
+        universe.structure, universe.cosmology, rate, n, rng
+    )
+    bbh = population.sample(n, rng)
+    hosts = sample_host_galaxies(
+        universe, catalogue, selection, n, rng, redshift=redshift
+    )
     return assemble_injection_set(
         hosts, bbh, universe.cosmology, detectable, rng, t_start, t_end
     )

@@ -12,7 +12,10 @@ from bagpuss.catalogue import (
     GalaxyCatalogue,
     MagnitudeLimitedSurvey,
     SelectionFunction,
+    _selection_weight_grid,
     build_catalogue,
+    expected_n_observed,
+    sample_observed_redshifts,
 )
 from bagpuss.galaxies import GalaxySet
 from bagpuss.luminosity import SchechterLuminosityModel
@@ -404,6 +407,161 @@ def _make_universe() -> Universe:
         structure=PointProcess(z_max=0.3),
         luminosity=_make_luminosity_model(phi_star=1e-5),
     )
+
+
+class TestExpectedNObserved(unittest.TestCase):
+    """Tests for expected_n_observed."""
+
+    def test_positive(self) -> None:
+        """Returns a positive value for typical parameters."""
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=19.5)
+        result = expected_n_observed(
+            universe.structure, universe.cosmology, universe.luminosity, selection
+        )
+        self.assertGreater(result, 0.0)
+
+    def test_less_than_or_equal_to_raw_density_times_volume(self) -> None:
+        """Completeness <= 1 everywhere, so observed count can't exceed raw count."""
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=19.5)
+        raw = universe.luminosity.number_density() * universe.structure.survey_volume(
+            universe.cosmology
+        )
+        observed = expected_n_observed(
+            universe.structure, universe.cosmology, universe.luminosity, selection
+        )
+        self.assertLessEqual(observed, raw)
+
+    def test_matches_raw_when_selection_unrestrictive(self) -> None:
+        """An extremely faint (unrestrictive) limit gives ~the same as the raw count."""
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=1000.0)
+        raw = universe.luminosity.number_density() * universe.structure.survey_volume(
+            universe.cosmology
+        )
+        observed = expected_n_observed(
+            universe.structure, universe.cosmology, universe.luminosity, selection
+        )
+        self.assertAlmostEqual(observed, raw, delta=raw * 1e-3)
+
+    def test_zero_when_selection_impossible(self) -> None:
+        """An impossibly bright limit gives zero expected observed galaxies."""
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=-100.0)
+        observed = expected_n_observed(
+            universe.structure, universe.cosmology, universe.luminosity, selection
+        )
+        self.assertAlmostEqual(observed, 0.0)
+
+
+class TestSampleObservedRedshifts(unittest.TestCase):
+    """Tests for sample_observed_redshifts."""
+
+    def test_shape(self) -> None:
+        """Returns an array of the requested length."""
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=19.5)
+        result = sample_observed_redshifts(
+            universe.structure,
+            universe.cosmology,
+            universe.luminosity,
+            selection,
+            500,
+            rng=np.random.default_rng(0),
+        )
+        self.assertEqual(result.shape, (500,))
+
+    def test_within_bounds(self) -> None:
+        """All sampled redshifts lie in [0, z_max]."""
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=19.5)
+        result = sample_observed_redshifts(
+            universe.structure,
+            universe.cosmology,
+            universe.luminosity,
+            selection,
+            2000,
+            rng=np.random.default_rng(1),
+        )
+        self.assertTrue(np.all(result >= 0.0))
+        self.assertTrue(np.all(result <= universe.structure.z_max))  # type: ignore[attr-defined]
+
+    def test_reproducible(self) -> None:
+        """Same RNG seed produces identical output."""
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=19.5)
+        r1 = sample_observed_redshifts(
+            universe.structure,
+            universe.cosmology,
+            universe.luminosity,
+            selection,
+            200,
+            rng=np.random.default_rng(42),
+        )
+        r2 = sample_observed_redshifts(
+            universe.structure,
+            universe.cosmology,
+            universe.luminosity,
+            selection,
+            200,
+            rng=np.random.default_rng(42),
+        )
+        np.testing.assert_array_equal(r1, r2)
+
+    def test_weighted_toward_low_z_relative_to_uniform_volume(self) -> None:
+        """Redshifts concentrate at lower z than an unweighted draw.
+
+        Completeness drops with z, so observed redshifts concentrate at
+        lower z than an unweighted, uniform-in-volume draw.
+        """
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=19.5)
+        weighted = sample_observed_redshifts(
+            universe.structure,
+            universe.cosmology,
+            universe.luminosity,
+            selection,
+            50_000,
+            rng=np.random.default_rng(2),
+        )
+        unweighted = universe.structure.sample_redshifts(
+            50_000, universe.cosmology, rng=np.random.default_rng(3)
+        )
+        self.assertLess(float(np.mean(weighted)), float(np.mean(unweighted)))
+
+    def test_matches_analytic_weight_shape(self) -> None:
+        """Empirical fraction below a spot-checked z matches the analytic CDF.
+
+        Compares against the weighted-CDF ratio computed directly from the
+        weight grid.
+        """
+        universe = _make_universe()
+        selection = MagnitudeLimitedSurvey(m_lim=19.5)
+        n = 200_000
+        sample = sample_observed_redshifts(
+            universe.structure,
+            universe.cosmology,
+            universe.luminosity,
+            selection,
+            n,
+            rng=np.random.default_rng(3),
+        )
+        z_test = 0.1
+        empirical = float(np.mean(sample <= z_test))
+
+        z_grid, weight = _selection_weight_grid(
+            universe.structure,
+            universe.cosmology,
+            universe.luminosity,
+            selection,
+            10_000,
+        )
+        mask = z_grid <= z_test
+        expected = float(np.trapezoid(weight[mask], z_grid[mask])) / float(
+            np.trapezoid(weight, z_grid)
+        )
+        self.assertAlmostEqual(empirical, expected, delta=0.01)
 
 
 class TestBuildCatalogue(unittest.TestCase):

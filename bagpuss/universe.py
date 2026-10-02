@@ -58,6 +58,38 @@ class Structure(ABC):
             Comoving volume of the survey in Mpc³.
         """
 
+    @property
+    @abstractmethod
+    def z_max(self) -> float:
+        """Return the maximum redshift of the simulated volume."""
+
+    @abstractmethod
+    def differential_comoving_volume(
+        self, z: np.ndarray, cosmology: FLRW
+    ) -> np.ndarray:
+        r"""Return the comoving volume element :math:`dV_C/dz` in Mpc³.
+
+        Already integrated over the model's sky coverage (the full 4π sr
+        for an untiled model, or a tile's solid angle for
+        :class:`SkyPatch`), so that integrating the returned values over
+        ``z`` from 0 to :attr:`z_max` reproduces :meth:`survey_volume`.
+        This is the quantity needed to convert a redshift-dependent rate
+        density into an expected event count (see
+        :func:`~bagpuss.population.expected_n_mergers`).
+
+        Parameters
+        ----------
+        z : numpy.ndarray
+            Redshifts at which to evaluate the volume element, shape ``(n,)``.
+        cosmology : astropy.cosmology.FLRW
+            Background cosmology used to compute the comoving volume element.
+
+        Returns
+        -------
+        numpy.ndarray
+            :math:`dV_C/dz` in Mpc³ at each redshift, shape ``(n,)``.
+        """
+
     @abstractmethod
     def sample_redshifts(
         self,
@@ -190,6 +222,42 @@ class LuminosityModel(ABC):
             brighter), shape ``(n,)``.  Values are in ``[0, 1]``.
         """
 
+    @abstractmethod
+    def sample_brighter_than(
+        self,
+        n: int,
+        magnitude_threshold: np.ndarray,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
+        """Draw luminosities conditioned on being brighter than a threshold.
+
+        Unlike :meth:`sample`, which draws unconditionally from the full
+        magnitude range, this draws each galaxy's luminosity conditioned on
+        its absolute magnitude being at or below (i.e. brighter than) a
+        per-galaxy threshold. This lets a caller sample directly from the
+        *observable* (selection-passing) population -- e.g. one galaxy per
+        redshift, each thresholded by that redshift's own distance-modulus
+        -shifted magnitude limit -- without ever drawing and discarding the
+        unobservable majority.
+
+        Parameters
+        ----------
+        n : int
+            Number of luminosities to sample.
+        magnitude_threshold : numpy.ndarray
+            Per-galaxy absolute-magnitude threshold, shape ``(n,)``. Only
+            galaxies with absolute magnitude at or below (brighter than)
+            ``magnitude_threshold[i]`` are drawn for element ``i``.
+        rng : numpy.random.Generator or None, optional
+            Random number generator.  If *None*, ``numpy.random.default_rng()``
+            is used.
+
+        Returns
+        -------
+        numpy.ndarray
+            Luminosities in solar luminosities, shape ``(n,)``.
+        """
+
 
 # ---------------------------------------------------------------------------
 # Universe
@@ -306,7 +374,12 @@ class PointProcess(Structure):
     def __init__(self, z_max: float) -> None:
         if z_max <= 0:
             raise ValueError(f"z_max must be positive, got {z_max!r}")
-        self.z_max = z_max
+        self._z_max = z_max
+
+    @property
+    def z_max(self) -> float:
+        """Return the maximum redshift of the simulated volume."""
+        return self._z_max
 
     def survey_volume(self, cosmology: FLRW) -> float:
         """Return the comoving volume out to ``z_max`` in Mpc³.
@@ -324,6 +397,28 @@ class PointProcess(Structure):
         return float(
             cosmology.comoving_volume(self.z_max).value  # pyright: ignore[reportAttributeAccessIssue]
         )
+
+    def differential_comoving_volume(
+        self, z: np.ndarray, cosmology: FLRW
+    ) -> np.ndarray:
+        r"""Return :math:`dV_C/dz` in Mpc³, integrated over the full 4π sr sky.
+
+        Parameters
+        ----------
+        z : numpy.ndarray
+            Redshifts at which to evaluate the volume element, shape ``(n,)``.
+        cosmology : astropy.cosmology.FLRW
+            Background cosmology used to compute the comoving volume element.
+
+        Returns
+        -------
+        numpy.ndarray
+            :math:`dV_C/dz` in Mpc³ at each redshift, shape ``(n,)``.
+        """
+        dvc_dz_dOmega = cosmology.differential_comoving_volume(  # pyright: ignore[reportAttributeAccessIssue]
+            z
+        ).to_value("Mpc3 / sr")
+        return np.asarray(4.0 * np.pi * dvc_dz_dOmega)
 
     def sample_redshifts(
         self,
@@ -428,6 +523,30 @@ class SkyPatch(Structure):
         ra_min, ra_max = self.ra_range
         u_min, u_max = self.sin_dec_range
         return (ra_max - ra_min) * (u_max - u_min) / (4.0 * np.pi)
+
+    @property
+    def z_max(self) -> float:
+        """Return the base model's maximum redshift."""
+        return self.base.z_max
+
+    def differential_comoving_volume(
+        self, z: np.ndarray, cosmology: FLRW
+    ) -> np.ndarray:
+        """Return the base model's volume element scaled by :attr:`sky_fraction`.
+
+        Parameters
+        ----------
+        z : numpy.ndarray
+            Redshifts at which to evaluate the volume element, shape ``(n,)``.
+        cosmology : astropy.cosmology.FLRW
+            Background cosmology, passed through to ``base``.
+
+        Returns
+        -------
+        numpy.ndarray
+            :math:`dV_C/dz` of the tile in Mpc³, shape ``(n,)``.
+        """
+        return self.base.differential_comoving_volume(z, cosmology) * self.sky_fraction
 
     def survey_volume(self, cosmology: FLRW) -> float:
         """Return the base model's survey volume scaled by :attr:`sky_fraction`.

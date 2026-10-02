@@ -189,3 +189,42 @@ class SchechterLuminosityModel(LuminosityModel):
         u = rng.uniform(0.0, 1.0, size=n)
         magnitudes = np.interp(u, self._cdf_grid, self._m_grid)
         return self._magnitudes_to_luminosities(magnitudes)
+
+    def sample_brighter_than(
+        self,
+        n: int,
+        magnitude_threshold: np.ndarray,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
+        """Draw luminosities conditioned on being brighter than a threshold.
+
+        Reuses the same precomputed ``_cdf_grid``/``_m_grid`` as
+        :meth:`sample` and :meth:`cdf` -- no new grid is needed. Sampling
+        from the distribution truncated to ``M <= magnitude_threshold`` is
+        just inverse-CDF sampling of the *unconditional* CDF at
+        ``u * cdf(magnitude_threshold)`` instead of at ``u`` directly, since
+        ``cdf(magnitude_threshold)`` is exactly the truncated distribution's
+        normalisation.
+
+        Parameters
+        ----------
+        n : int
+            Number of luminosities to sample.
+        magnitude_threshold : numpy.ndarray
+            Per-galaxy absolute-magnitude threshold, shape ``(n,)``.
+        rng : numpy.random.Generator or None, optional
+            Random number generator.  If *None*, ``numpy.random.default_rng()``
+            is used.
+
+        Returns
+        -------
+        numpy.ndarray
+            Luminosities in solar luminosities, shape ``(n,)``.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        cdf_at_threshold = self.cdf(np.asarray(magnitude_threshold))
+        u = rng.uniform(0.0, 1.0, size=n)
+        magnitudes = np.interp(u * cdf_at_threshold, self._cdf_grid, self._m_grid)
+        return self._magnitudes_to_luminosities(magnitudes)

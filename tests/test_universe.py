@@ -34,6 +34,18 @@ class _FlatLuminosity(LuminosityModel):
         """Return a fixed placeholder density of 1.0 Mpc⁻³."""
         return 1.0
 
+    def sample_brighter_than(
+        self,
+        n: int,
+        magnitude_threshold: np.ndarray,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
+        """Return a constant-luminosity array.
+
+        cdf is 1.0 everywhere so every threshold is always satisfied.
+        """
+        return np.ones(n) * 1e10
+
 
 # ---------------------------------------------------------------------------
 # Abstract base class instantiation guards
@@ -141,6 +153,28 @@ class TestPointProcess(unittest.TestCase):
         ra, dec = pp.sample_positions(10, rng=None)
         self.assertEqual(ra.shape, (10,))
         self.assertEqual(dec.shape, (10,))
+
+    def test_differential_comoving_volume_shape(self) -> None:
+        """differential_comoving_volume returns an array matching z's shape."""
+        pp = PointProcess(z_max=1.0)
+        z = np.linspace(0.0, 1.0, 50)
+        dvc_dz = pp.differential_comoving_volume(z, Planck18)
+        self.assertEqual(dvc_dz.shape, (50,))
+
+    def test_differential_comoving_volume_positive(self) -> None:
+        """dVc/dz is positive for z > 0."""
+        pp = PointProcess(z_max=1.0)
+        z = np.linspace(0.01, 1.0, 50)
+        dvc_dz = pp.differential_comoving_volume(z, Planck18)
+        self.assertTrue(np.all(dvc_dz > 0.0))
+
+    def test_differential_comoving_volume_integrates_to_survey_volume(self) -> None:
+        """Integrating dVc/dz from 0 to z_max reproduces survey_volume."""
+        pp = PointProcess(z_max=0.7)
+        z = np.linspace(0.0, 0.7, 200_000)
+        dvc_dz = pp.differential_comoving_volume(z, Planck18)
+        integral = float(np.trapezoid(dvc_dz, z))
+        self.assertAlmostEqual(integral / pp.survey_volume(Planck18), 1.0, places=5)
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +289,21 @@ class TestSkyPatch(unittest.TestCase):
         ]
         total = sum(tile.survey_volume(Planck18) for tile in tiles)
         self.assertAlmostEqual(total, base.survey_volume(Planck18))
+
+    def test_z_max_delegates_to_base(self) -> None:
+        """z_max matches the base model's z_max."""
+        base = PointProcess(z_max=2.5)
+        tile = SkyPatch(base, ra_range=(0.0, np.pi), sin_dec_range=(0.0, 1.0))
+        self.assertEqual(tile.z_max, 2.5)
+
+    def test_differential_comoving_volume_scaled_by_sky_fraction(self) -> None:
+        """dVc/dz is the base model's value times sky_fraction."""
+        base = PointProcess(z_max=1.0)
+        tile = SkyPatch(base, ra_range=(0.0, np.pi), sin_dec_range=(0.0, 1.0))
+        z = np.linspace(0.01, 1.0, 20)
+        base_dvc = base.differential_comoving_volume(z, Planck18)
+        tile_dvc = tile.differential_comoving_volume(z, Planck18)
+        np.testing.assert_allclose(tile_dvc, base_dvc * 0.25)
 
 
 # ---------------------------------------------------------------------------

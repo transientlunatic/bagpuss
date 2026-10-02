@@ -15,15 +15,18 @@ from bagpuss.injection import (
     HostAssignment,
     InjectionSet,
     assemble_injection_set,
+    build_injection_set,
     create_injection_set,
     sample_host_galaxies,
 )
 from bagpuss.luminosity import SchechterLuminosityModel
 from bagpuss.population import (
     BBHSet,
+    ConstantMergerRate,
     IsotropicSpinDistribution,
     PopulationModel,
     PowerLawPlusPeakMassDistribution,
+    expected_n_mergers,
 )
 from bagpuss.universe import PointProcess, Universe
 
@@ -101,6 +104,10 @@ def _make_population() -> PopulationModel:
         mass=PowerLawPlusPeakMassDistribution(**_MASS_PARAMS),
         spin=IsotropicSpinDistribution(),
     )
+
+
+def _make_rate(rate_density_value: float = 1e-4) -> ConstantMergerRate:
+    return ConstantMergerRate(rate_density_value=rate_density_value)
 
 
 def _make_host_assignment(n: int = _N_EVENTS) -> HostAssignment:
@@ -440,6 +447,40 @@ class TestSampleHostGalaxies(unittest.TestCase):
             result.redshift[observed], catalogue.redshifts[idx]
         )
 
+    def test_redshift_override_used_verbatim_for_uncatalogued_hosts(self) -> None:
+        """A precomputed redshift array is used in place of structure sampling."""
+        universe = _make_universe()
+        selection = _make_selection(m_lim=-100.0)  # nothing gets catalogued
+        catalogue = _make_consistent_catalogue(universe, selection)
+        preset_redshift = np.array([0.05, 0.1, 0.15, 0.2])
+        result = sample_host_galaxies(
+            universe=universe,
+            catalogue=catalogue,
+            selection=selection,
+            n=999,  # deliberately wrong; redshift's length should win
+            rng=np.random.default_rng(0),
+            redshift=preset_redshift,
+        )
+        self.assertEqual(len(result), 4)
+        np.testing.assert_array_equal(result.redshift, preset_redshift)
+
+    def test_redshift_override_not_mutated(self) -> None:
+        """The caller's redshift array is not mutated in place."""
+        universe = _make_universe()
+        selection = _make_selection(m_lim=23.0)
+        catalogue = _make_consistent_catalogue(universe, selection)
+        preset_redshift = np.full(200, 0.2)
+        original = preset_redshift.copy()
+        sample_host_galaxies(
+            universe=universe,
+            catalogue=catalogue,
+            selection=selection,
+            n=200,
+            rng=np.random.default_rng(0),
+            redshift=preset_redshift,
+        )
+        np.testing.assert_array_equal(preset_redshift, original)
+
 
 # ---------------------------------------------------------------------------
 # assemble_injection_set
@@ -607,3 +648,107 @@ class TestCreateInjectionSet(unittest.TestCase):
         ]
         for f in fields:
             self.assertEqual(len(f), n)
+
+
+# ---------------------------------------------------------------------------
+# build_injection_set
+# ---------------------------------------------------------------------------
+
+#: Small enough to keep the Poisson-realised event count in the low hundreds
+#: for the _Z_MAX = 0.3, one-year test window, while still large enough that
+#: n > 0 is essentially certain.
+_TEST_RATE_DENSITY = 2e-8
+_ONE_YEAR_SECONDS = 365.25 * 86400.0
+
+
+def _make_physical_injection_set(
+    rate_density_value: float = _TEST_RATE_DENSITY,
+    rng: np.random.Generator | None = None,
+) -> InjectionSet:
+    universe = _make_universe()
+    selection = _make_selection(m_lim=23.0)
+    catalogue = _make_consistent_catalogue(universe, selection)
+    return build_injection_set(
+        universe=universe,
+        catalogue=catalogue,
+        selection=selection,
+        population=_make_population(),
+        rate=_make_rate(rate_density_value),
+        t_start=0.0,
+        t_end=_ONE_YEAR_SECONDS,
+        rng=rng if rng is not None else np.random.default_rng(42),
+    )
+
+
+class TestBuildInjectionSet(unittest.TestCase):
+    """Tests for the rate-driven build_injection_set convenience wrapper."""
+
+    def test_returns_injection_set(self) -> None:
+        """build_injection_set returns an InjectionSet."""
+        result = _make_physical_injection_set()
+        self.assertIsInstance(result, InjectionSet)
+
+    def test_nonzero_events_drawn(self) -> None:
+        """A reasonable rate over a one-year window yields some events."""
+        result = _make_physical_injection_set()
+        self.assertGreater(len(result), 0)
+
+    def test_reproducible(self) -> None:
+        """Same seed produces an identical event count and parameters."""
+        r1 = _make_physical_injection_set(rng=np.random.default_rng(5))
+        r2 = _make_physical_injection_set(rng=np.random.default_rng(5))
+        self.assertEqual(len(r1), len(r2))
+        np.testing.assert_array_equal(r1.m1_source, r2.m1_source)
+        np.testing.assert_array_equal(r1.redshift, r2.redshift)
+
+    def test_event_count_scales_with_rate(self) -> None:
+        """A much higher rate density yields more events (statistically)."""
+        low = _make_physical_injection_set(
+            rate_density_value=_TEST_RATE_DENSITY, rng=np.random.default_rng(1)
+        )
+        high = _make_physical_injection_set(
+            rate_density_value=_TEST_RATE_DENSITY * 20.0,
+            rng=np.random.default_rng(1),
+        )
+        self.assertGreater(len(high), len(low))
+
+    def test_redshifts_within_z_max(self) -> None:
+        """All event redshifts lie within the structure model's z_max."""
+        result = _make_physical_injection_set()
+        self.assertTrue(np.all(result.redshift >= 0.0))
+        self.assertTrue(np.all(result.redshift <= _Z_MAX))
+
+    def test_all_fields_same_length(self) -> None:
+        """All fields of the returned InjectionSet have the same length."""
+        result = _make_physical_injection_set()
+        n = len(result)
+        for field in TestInjectionSet._FIELDS:
+            self.assertEqual(len(getattr(result, field)), n)
+
+    def test_no_detectable_keeps_all_drawn_events(self) -> None:
+        """Without a detectability filter, every Poisson-drawn event survives."""
+        universe = _make_universe()
+        selection = _make_selection(m_lim=23.0)
+        catalogue = _make_consistent_catalogue(universe, selection)
+        rng = np.random.default_rng(9)
+        n_expected = expected_n_mergers(
+            universe.structure,
+            universe.cosmology,
+            _make_rate(_TEST_RATE_DENSITY),
+            t_start=0.0,
+            t_end=_ONE_YEAR_SECONDS,
+        )
+        result = build_injection_set(
+            universe=universe,
+            catalogue=catalogue,
+            selection=selection,
+            population=_make_population(),
+            rate=_make_rate(_TEST_RATE_DENSITY),
+            t_start=0.0,
+            t_end=_ONE_YEAR_SECONDS,
+            rng=rng,
+        )
+        # n_expected is a mean, not the exact draw; just sanity-check it's
+        # in the right ballpark (>3-sigma would be suspicious).
+        tolerance = 5.0 * np.sqrt(n_expected)
+        self.assertLess(abs(len(result) - n_expected), tolerance)
