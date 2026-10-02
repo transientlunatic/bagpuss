@@ -8,10 +8,12 @@ up the shape described in :mod:`bagpuss.mdc.pipeline`::
         PARENT of  consolidate_catalogue
         CHILD of   injection_shard_0000 .. injection_shard_MMMM (parallel)
             CHILD of  assemble_injections
-                CHILD of  package_manifest
+                CHILD of  detect_shard_0000 .. detect_shard_MMMM (parallel)
+                    CHILD of  assemble_detections
+                        CHILD of  package_manifest
 
 Each node's own exit status is the go/no-go gate between tiers:
-``consolidate_catalogue``/``assemble_injections`` raise
+``consolidate_catalogue``/``assemble_injections``/``assemble_detections`` raise
 :class:`~bagpuss.mdc.pipeline.MDCValidationError` (nonzero exit, via the
 ``bagpuss mdc`` CLI) when their sanity checks fail, which DAGMan already
 treats as a failed node -- so no separate POST script is needed to gate
@@ -65,6 +67,15 @@ DEFAULT_RESOURCES: dict[str, CondorResources] = {
     "assemble_injections": CondorResources(
         request_cpus=1, request_memory="4GB", request_disk="2GB"
     ),
+    # SNR calculation + frame writing is the expensive stage; the disk
+    # request is for the shard's frame files. Revisit after the first
+    # real shard has been timed.
+    "detect_shard": CondorResources(
+        request_cpus=1, request_memory="8GB", request_disk="10GB"
+    ),
+    "assemble_detections": CondorResources(
+        request_cpus=1, request_memory="4GB", request_disk="2GB"
+    ),
     "package_manifest": CondorResources(
         request_cpus=1, request_memory="2GB", request_disk="2GB"
     ),
@@ -93,6 +104,8 @@ _LOG_STEMS: dict[str, str] = {
     "consolidate_catalogue": "consolidate_catalogue",
     "injection_shard": "injection_shard_$(shard_id)",
     "assemble_injections": "assemble_injections",
+    "detect_shard": "detect_shard_$(shard_id)",
+    "assemble_detections": "assemble_detections",
     "package_manifest": "package_manifest",
 }
 
@@ -134,6 +147,10 @@ def _write_submit_files(
             f"mdc generate-injections --config {config_path} --shard-id $(shard_id)"
         ),
         "assemble_injections": f"mdc assemble-injections --config {config_path}",
+        "detect_shard": (
+            f"mdc detect-injections --config {config_path} --shard-id $(shard_id)"
+        ),
+        "assemble_detections": f"mdc assemble-detections --config {config_path}",
         "package_manifest": f"mdc package --config {config_path}",
     }
     paths: dict[str, Path] = {}
@@ -147,38 +164,77 @@ def _write_submit_files(
     return paths
 
 
-def _render_dag(config: MDCConfig, submit_paths: dict[str, Path]) -> str:
-    """Render the full ``mdc.dag`` contents for *config*."""
+def _render_dag(
+    config: MDCConfig,
+    submit_paths: dict[str, Path],
+    include_detection: bool = True,
+    include_generation: bool = True,
+) -> str:
+    """Render the full ``mdc.dag`` contents for *config*.
+
+    With ``include_detection=False`` the detect/assemble-detections nodes are
+    omitted and ``package_manifest`` follows ``assemble_injections``. With
+    ``include_generation=False`` the catalogue/injection nodes are omitted
+    and the DAG starts at the detection shards (for re-running detection
+    against an already-generated store).
+    """
+    if not include_generation and not include_detection:
+        raise ValueError("a DAG with neither generation nor detection is empty")
     lines: list[str] = []
 
-    tile_names = [f"catalogue_tile_{i:04d}" for i in range(config.n_tiles)]
-    for i, name in enumerate(tile_names):
-        lines.append(f"JOB {name} {submit_paths['catalogue_tile']}")
-        lines.append(f'VARS {name} tile_id="{i:04d}"')
-        lines.append(f"RETRY {name} 2")
-    lines.append("")
+    if include_generation:
+        tile_names = [f"catalogue_tile_{i:04d}" for i in range(config.n_tiles)]
+        for i, name in enumerate(tile_names):
+            lines.append(f"JOB {name} {submit_paths['catalogue_tile']}")
+            lines.append(f'VARS {name} tile_id="{i:04d}"')
+            lines.append(f"RETRY {name} 2")
+        lines.append("")
 
-    lines.append(f"JOB consolidate_catalogue {submit_paths['consolidate_catalogue']}")
-    lines.append("RETRY consolidate_catalogue 2")
-    lines.append(f"PARENT {' '.join(tile_names)} CHILD consolidate_catalogue")
-    lines.append("")
+        lines.append(
+            f"JOB consolidate_catalogue {submit_paths['consolidate_catalogue']}"
+        )
+        lines.append("RETRY consolidate_catalogue 2")
+        lines.append(f"PARENT {' '.join(tile_names)} CHILD consolidate_catalogue")
+        lines.append("")
 
-    shard_names = [f"injection_shard_{i:04d}" for i in range(config.n_injection_shards)]
-    for i, name in enumerate(shard_names):
-        lines.append(f"JOB {name} {submit_paths['injection_shard']}")
-        lines.append(f'VARS {name} shard_id="{i:04d}"')
-        lines.append(f"RETRY {name} 2")
-    lines.append(f"PARENT consolidate_catalogue CHILD {' '.join(shard_names)}")
-    lines.append("")
+        shard_names = [
+            f"injection_shard_{i:04d}" for i in range(config.n_injection_shards)
+        ]
+        for i, name in enumerate(shard_names):
+            lines.append(f"JOB {name} {submit_paths['injection_shard']}")
+            lines.append(f'VARS {name} shard_id="{i:04d}"')
+            lines.append(f"RETRY {name} 2")
+        lines.append(f"PARENT consolidate_catalogue CHILD {' '.join(shard_names)}")
+        lines.append("")
 
-    lines.append(f"JOB assemble_injections {submit_paths['assemble_injections']}")
-    lines.append("RETRY assemble_injections 2")
-    lines.append(f"PARENT {' '.join(shard_names)} CHILD assemble_injections")
-    lines.append("")
+        lines.append(f"JOB assemble_injections {submit_paths['assemble_injections']}")
+        lines.append("RETRY assemble_injections 2")
+        lines.append(f"PARENT {' '.join(shard_names)} CHILD assemble_injections")
+        lines.append("")
+
+    if include_detection:
+        detect_names = [
+            f"detect_shard_{i:04d}" for i in range(config.n_injection_shards)
+        ]
+        for i, name in enumerate(detect_names):
+            lines.append(f"JOB {name} {submit_paths['detect_shard']}")
+            lines.append(f'VARS {name} shard_id="{i:04d}"')
+            lines.append(f"RETRY {name} 2")
+        if include_generation:
+            lines.append(f"PARENT assemble_injections CHILD {' '.join(detect_names)}")
+        lines.append("")
+
+        lines.append(f"JOB assemble_detections {submit_paths['assemble_detections']}")
+        lines.append("RETRY assemble_detections 2")
+        lines.append(f"PARENT {' '.join(detect_names)} CHILD assemble_detections")
+        lines.append("")
+        last = "assemble_detections"
+    else:
+        last = "assemble_injections"
 
     lines.append(f"JOB package_manifest {submit_paths['package_manifest']}")
     lines.append("RETRY package_manifest 2")
-    lines.append("PARENT assemble_injections CHILD package_manifest")
+    lines.append(f"PARENT {last} CHILD package_manifest")
     lines.append("")
 
     return "\n".join(lines)
@@ -190,6 +246,8 @@ def write_dag(
     out_dir: str | Path,
     bagpuss_executable: str,
     resources: dict[str, CondorResources] | None = None,
+    include_detection: bool = True,
+    include_generation: bool = True,
 ) -> Path:
     """Render and write the full DAG plus submit files for *config*.
 
@@ -214,6 +272,12 @@ def write_dag(
     resources : dict[str, CondorResources] or None, optional
         Per-stage resource overrides. Falls back to
         :data:`DEFAULT_RESOURCES` for any stage not given.
+    include_detection : bool, optional
+        If ``False``, omit the detection stage (SNRs/frames/blueprints), so
+        the DAG stops at injections and the manifest.
+    include_generation : bool, optional
+        If ``False``, omit catalogue and injection generation, so the DAG
+        only (re-)runs detection against an already-generated store.
 
     Returns
     -------
@@ -232,7 +296,7 @@ def write_dag(
     submit_paths = _write_submit_files(
         config, config_path, out_dir, log_dir, bagpuss_executable, merged_resources
     )
-    dag_text = _render_dag(config, submit_paths)
+    dag_text = _render_dag(config, submit_paths, include_detection, include_generation)
 
     dag_path = out_dir / "mdc.dag"
     dag_path.write_text(dag_text)

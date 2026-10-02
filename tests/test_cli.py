@@ -252,8 +252,12 @@ class TestHeatmapCommand(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 _TINY_MDC_CONFIG = (
-    "z_max: 0.1\nphi_star: 1.0e-5\nm_lim: 25.0\nn_ra_tiles: 2\nn_dec_tiles: 1\n"
-    "n_injection_shards: 2\nn_draw_per_shard: 20\nd_max: 5000.0\nstore: store.zarr\n"
+    "galaxies:\n  z_max: 0.1\n  luminosity_function:\n    phi_star: 1.0e-5\n"
+    "  selection:\n    m_lim: 25.0\n"
+    "population:\n  rate_density: 3.0e-7\n"
+    "observation:\n  d_max: 5000.0\n"
+    "sharding:\n  n_ra_tiles: 2\n  n_dec_tiles: 1\n  n_injection_shards: 2\n"
+    "run:\n  store: store.zarr\n"
 )
 
 
@@ -273,7 +277,10 @@ class TestMdcCommands(unittest.TestCase):
             "consolidate",
             "generate-injections",
             "assemble-injections",
+            "detect-injections",
+            "assemble-detections",
             "package",
+            "expected-count",
             "make-dag",
         ):
             self.assertIn(name, result.output)
@@ -343,6 +350,44 @@ class TestMdcCommands(unittest.TestCase):
             )
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("FAILED", result.output)
+
+    def test_expected_count_no_d_max(self) -> None:
+        """``expected-count`` reports a total but no detected count without d_max."""
+        no_d_max_config = (
+            "galaxies:\n  z_max: 0.1\n  luminosity_function:\n    phi_star: 1.0e-5\n"
+            "  selection:\n    m_lim: 25.0\n"
+            "population:\n  rate_density: 3.0e-7\n"
+            "run:\n  store: store.zarr\n"
+        )
+        with self.runner.isolated_filesystem():
+            Path("config.yaml").write_text(no_d_max_config, encoding="utf-8")
+            result = self.runner.invoke(
+                main, ["mdc", "expected-count", "--config", "config.yaml"]
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("expected mergers in survey volume", result.output)
+            self.assertIn("not estimated", result.output)
+
+    def test_expected_count_with_d_max_and_t_obs_years(self) -> None:
+        """``expected-count`` reports a detected count when --d-max is passed."""
+        with self.runner.isolated_filesystem():
+            Path("config.yaml").write_text(_TINY_MDC_CONFIG, encoding="utf-8")
+            result = self.runner.invoke(
+                main,
+                [
+                    "mdc",
+                    "expected-count",
+                    "--config",
+                    "config.yaml",
+                    "--d-max",
+                    "200.0",
+                    "--t-obs-years",
+                    "1.0",
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("1.000 years", result.output)
+            self.assertIn("expected DETECTED mergers", result.output)
 
     def test_make_dag(self) -> None:
         """``make-dag`` renders a DAG without touching condor."""
