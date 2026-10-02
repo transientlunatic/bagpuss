@@ -32,6 +32,17 @@ selection, and it implicitly assumes the merger rate is proportional to galaxy
 number. For stellar-mass- or star-formation-rate-weighted host assignment,
 subclass or wrap :func:`~bagpuss.injection.sample_host_galaxies`.
 
+.. note::
+
+   When the event redshifts are drawn from a merger-rate model (as in
+   :func:`~bagpuss.injection.build_injection_set`), a catalogued event's host is
+   a *uniformly random* catalogue row, so the redshifts of catalogued events
+   follow the catalogue's own redshift distribution rather than the
+   :math:`R(z)/(1+z)` weighting of the event distribution (uncatalogued events
+   do follow it). For a constant rate this is a factor of :math:`(1+z)` in the
+   catalogued events' redshift distribution, and it only matters where
+   catalogued hosts are common, i.e. at low redshift or with a deep survey.
+
 :func:`~bagpuss.injection.build_injection_set` does the same but draws the
 number of events from a :class:`~bagpuss.population.MergerRate` and an
 observation window, instead of taking a caller-chosen ``n_draw``.

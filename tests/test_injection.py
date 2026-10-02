@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 import numpy as np
@@ -236,7 +237,7 @@ class TestInjectionSet(unittest.TestCase):
             inj.to_zarr(shard)
 
             root_r = zarr.open_group(store=str(Path(tmp) / "store.zarr"), mode="r")
-            loaded = InjectionSet.from_zarr(root_r["shard_0000"])
+            loaded = InjectionSet.from_zarr(cast(zarr.Group, root_r["shard_0000"]))
         np.testing.assert_allclose(loaded.m1_source, inj.m1_source)
 
     @property
@@ -636,7 +637,7 @@ class TestCreateInjectionSet(unittest.TestCase):
 
     def test_reproducible(self) -> None:
         """Same seed produces identical output."""
-        kwargs = dict(
+        kwargs: dict[str, Any] = dict(
             universe=_make_universe(),
             catalogue=_make_catalogue(),
             selection=_make_selection(),

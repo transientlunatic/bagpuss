@@ -42,7 +42,9 @@ def _apparent_magnitude(
     m_sun: float = 4.83,
 ) -> float:
     """Compute the expected apparent magnitude for a galaxy."""
-    d_L_pc = float(Planck18.luminosity_distance(z).to("pc").value)
+    d_L_pc = float(
+        Planck18.luminosity_distance(z).to("pc").value  # pyright: ignore[reportAttributeAccessIssue]
+    )
     mu = 5.0 * np.log10(d_L_pc / 10.0)
     M_abs = m_sun - 2.5 * np.log10(luminosity)
     return float(M_abs + mu)

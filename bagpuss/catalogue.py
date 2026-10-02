@@ -219,7 +219,11 @@ class MagnitudeLimitedSurvey(SelectionFunction):
                 dec=empty,
             )
 
-        d_L_pc = cosmology.luminosity_distance(galaxies.redshifts).to("pc").value
+        d_L_pc = (
+            cosmology.luminosity_distance(galaxies.redshifts)  # pyright: ignore[reportAttributeAccessIssue]
+            .to("pc")
+            .value
+        )
         distance_modulus = 5.0 * np.log10(d_L_pc / 10.0)
         abs_magnitudes = self.m_sun - 2.5 * np.log10(galaxies.luminosities)
         apparent_magnitudes = abs_magnitudes + distance_modulus

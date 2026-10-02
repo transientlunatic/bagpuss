@@ -626,8 +626,12 @@ class DefaultSpinDistribution(SpinDistribution):
             rng = np.random.default_rng()
         seed1 = int(rng.integers(0, 2**31))
         seed2 = int(rng.integers(0, 2**31))
-        a1 = beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed1)
-        a2 = beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed2)
+        a1 = np.asarray(
+            beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed1)
+        )
+        a2 = np.asarray(
+            beta_dist.rvs(self.alpha_chi, self.beta_chi, size=n, random_state=seed2)
+        )
         cos_tilt1 = self._sample_cos_tilt(n, rng)
         cos_tilt2 = self._sample_cos_tilt(n, rng)
         phi12 = rng.uniform(0.0, 2.0 * np.pi, size=n)

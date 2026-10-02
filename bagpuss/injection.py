@@ -21,6 +21,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import h5py
 import numpy as np
@@ -172,8 +173,10 @@ class InjectionSet:
         InjectionSet
         """
         with h5py.File(path, "r") as f:
-            grp = f["injections"]
-            data = {field: grp[field][()] for field in _INJECTION_FIELDS}
+            grp = cast(h5py.Group, f["injections"])
+            data = {
+                field: cast(h5py.Dataset, grp[field])[()] for field in _INJECTION_FIELDS
+            }
         return cls(**data)
 
     def to_zarr(self, group: zarr.Group | str | Path) -> None:
@@ -377,6 +380,15 @@ def sample_host_galaxies(
     HostAssignment
         Host redshifts, sky positions, and catalogue indices for ``n``
         events.  ``host_galaxy_index == -1`` for uncatalogued hosts.
+
+    Notes
+    -----
+    A catalogued event's host is a uniformly random catalogue row, whatever
+    its trial redshift. If ``redshift`` is drawn from a merger-rate model, the
+    redshifts of catalogued events therefore follow the catalogue's own
+    distribution rather than the rate's :math:`R(z)/(1+z)` weighting (for a
+    constant rate, a factor of :math:`(1+z)`); uncatalogued events do follow it.
+    The effect is small unless catalogued hosts are common.
     """
     if rng is None:
         rng = np.random.default_rng()

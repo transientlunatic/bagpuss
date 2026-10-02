@@ -66,6 +66,16 @@ Pipeline shape
    against the *consolidated* catalogue (so ``host_galaxy_index`` is a valid
    global index), applies the configured detectability filter, and writes
    the shard to ``<store>/injections/shard_%04d``.
+
+   .. note::
+
+      Every injection shard loads the whole consolidated catalogue into
+      memory (five float64 arrays, about 0.5 GB per 12.8 million galaxies),
+      so the catalogue must fit in memory in each concurrent shard job.
+      That is comfortable at the z=3 scale this was built for, but it would
+      not scale to hundreds of millions of galaxies; host rows would then
+      have to be sampled from the tile index and only those rows read. The
+      release export, by contrast, streams the catalogue tile by tile.
 4. **assemble-injections**
    (:func:`~bagpuss.mdc.pipeline.assemble_injections`) — mirrors
    ``consolidate`` for injection shards.
