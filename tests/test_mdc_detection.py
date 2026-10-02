@@ -51,22 +51,15 @@ def _fake_minke(returned_key: str) -> dict[str, types.ModuleType]:
 
 
 class TestMinkeBackendInjectionParameters(unittest.TestCase):
-    """minke names the inclination ``iota`` but its waveforms read ``inclination``."""
+    """The backend hands minke's own waveform parameters straight through."""
 
-    def test_iota_renamed_to_inclination(self) -> None:
-        """Without the rename minke silently injects every event face-on."""
-        with mock.patch.dict(sys.modules, _fake_minke("iota")):
-            params = MinkeBackend().injection_parameters(_injections(), f_ref=20.0)
-        for event in params:
-            self.assertNotIn("iota", event)
-            self.assertAlmostEqual(event["inclination"], 1.23)
-
-    def test_already_inclination_left_alone(self) -> None:
-        """A minke that emits ``inclination`` directly is passed through."""
+    def test_parameters_passed_through(self) -> None:
+        """Minke >= 2.3.0 already emits ``inclination``, so nothing is rewritten."""
         with mock.patch.dict(sys.modules, _fake_minke("inclination")):
             params = MinkeBackend().injection_parameters(_injections(), f_ref=20.0)
+        self.assertEqual(len(params), 2)
         for event in params:
-            self.assertAlmostEqual(event["inclination"], 1.23)
+            self.assertEqual(event, {"inclination": 1.23, "gpstime": 1.2e9})
 
 
 class _Quantity:
@@ -119,7 +112,7 @@ class TestMissingDutyCycle(unittest.TestCase):
                 MinkeBackend().duty_schedules(
                     MDCConfig(), 0.0, 1.0, np.random.default_rng(0)
                 )
-        self.assertIn("after 2.2.1", str(ctx.exception))
+        self.assertIn("2.3.0", str(ctx.exception))
 
 
 class TestCapEta(unittest.TestCase):

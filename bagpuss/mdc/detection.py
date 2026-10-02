@@ -54,8 +54,8 @@ def _duty_cycle() -> Any:  # noqa: ANN401
         from minke import duty_cycle
     except ImportError as exc:
         raise ImportError(
-            "the detection stage needs minke.duty_cycle, which is in minke releases "
-            "after 2.2.1 (not in 2.2.1 itself); install a newer minke"
+            "the detection stage needs minke.duty_cycle, which is in minke 2.3.0 and "
+            "later (not in 2.2.1); install a newer minke"
         ) from exc
     return duty_cycle
 
@@ -140,15 +140,7 @@ class MinkeBackend:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "injections.h5"
             injections.to_hdf5(path)
-            params = list(read_injection_parameters(str(path), f_ref=f_ref))
-        # minke's reader (as of 2.2.1) returns the L-frame inclination as
-        # ``iota``, but its waveform models read ``inclination`` (default 0),
-        # so without this rename every event is injected face-on and its SNR
-        # is inflated by an orientation-dependent factor of ~1.4-4x.
-        for event in params:
-            if "iota" in event:
-                event["inclination"] = event.pop("iota")
-        return params
+            return list(read_injection_parameters(str(path), f_ref=f_ref))
 
     def abbreviation(self, detector: str) -> str:
         """Return *detector*'s abbreviation via minke."""
