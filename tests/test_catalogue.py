@@ -141,7 +141,7 @@ class TestGalaxyCatalogue(unittest.TestCase):
             cat.to_zarr(tile)
 
             root_r = zarr.open_group(store=str(Path(tmp) / "store.zarr"), mode="r")
-            loaded = GalaxyCatalogue.from_zarr(root_r["tile_0000"])
+            loaded = GalaxyCatalogue.from_zarr(root_r["tile_0000"])  # pyright: ignore[reportArgumentType]
         np.testing.assert_allclose(loaded.redshifts, cat.redshifts)
 
 
@@ -387,7 +387,7 @@ class TestMagnitudeLimitedSurveyCompleteness(unittest.TestCase):
         survey = MagnitudeLimitedSurvey(m_lim=19.5)
         model = _make_luminosity_model()
         z = np.array([0.1])
-        d_l_pc = Planck18.luminosity_distance(z).to("pc").value
+        d_l_pc = Planck18.luminosity_distance(z).to("pc").value  # pyright: ignore[reportAttributeAccessIssue]
         mu = 5.0 * np.log10(d_l_pc / 10.0)
         expected = model.cdf(survey.m_lim - mu)
         result = survey.completeness(z, np.zeros(1), np.zeros(1), Planck18, model)

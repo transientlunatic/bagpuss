@@ -78,6 +78,11 @@ def _portable_config(text: str) -> str:
     return re.sub(r"(?m)^(\s*output_dir:\s*).*$", r"\1mdc_out", text)
 
 
+def _dataset(handle: h5py.File, name: str) -> h5py.Dataset:
+    """Return the dataset *name* of *handle* (h5py's indexing is typed as a union)."""
+    return cast(h5py.Dataset, handle[name])
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -548,8 +553,8 @@ def verify_release(out_dir: str | Path) -> dict[str, Any]:
         h5py.File(out / "catalogue.h5", "r") as cat,
         h5py.File(out / "injections.h5", "r") as inj,
     ):
-        n_gal = cat["catalogue/ra"].shape[0]
-        n_inj = inj["injections/geocent_time"].shape[0]
+        n_gal = _dataset(cat, "catalogue/ra").shape[0]
+        n_inj = _dataset(inj, "injections/geocent_time").shape[0]
         if n_gal != counts["n_galaxies"]:
             issues.append(
                 f"catalogue has {n_gal} rows, manifest says {counts['n_galaxies']}"
@@ -559,7 +564,7 @@ def verify_release(out_dir: str | Path) -> dict[str, Any]:
                 f"injections has {n_inj} rows, manifest says {counts['n_injections']}"
             )
 
-        host = inj["injections/host_galaxy_index"][()]
+        host = _dataset(inj, "injections/host_galaxy_index")[()]
         hosted = np.flatnonzero(host >= 0)
         if len(hosted):
             rows = host[hosted]
@@ -573,15 +578,15 @@ def verify_release(out_dir: str | Path) -> dict[str, Any]:
                     ("dec", "dec"),
                     ("redshift", "redshift"),
                 ):
-                    expected = cat[f"catalogue/{cat_field}"][rows_sorted]
-                    got = inj[f"injections/{field}"][hosted][order]
+                    expected = _dataset(cat, f"catalogue/{cat_field}")[rows_sorted]
+                    got = _dataset(inj, f"injections/{field}")[hosted][order]
                     if not np.allclose(expected, got):
                         issues.append(f"host {field} disagrees with the catalogue")
 
         listed = (
             {
                 s.decode() if isinstance(s, bytes) else s
-                for s in inj["injections/skymap_file"][()]
+                for s in _dataset(inj, "injections/skymap_file")[()]
             }
             - {""}
             if "injections/skymap_file" in inj

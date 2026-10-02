@@ -14,6 +14,9 @@ command-line tools (``ligo.skymap``) and ``igwn-ligolw`` are needed, and both
 are imported lazily so the rest of :mod:`bagpuss.mdc` does not depend on them.
 """
 
+# igwn-ligolw is an optional, lazily-imported dependency (see the module docstring).
+# pyright: reportMissingImports=false
+
 from __future__ import annotations
 
 import os

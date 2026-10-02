@@ -106,7 +106,7 @@ class TestWriteGladeCatalogue(unittest.TestCase):
         write_glade_catalogue(self.catalogue, Planck18, self.path, m_sun=4.83)
         rows = self._read_rows()
         expected = (
-            Planck18.luminosity_distance(self.catalogue.redshifts).to("Mpc").value
+            Planck18.luminosity_distance(self.catalogue.redshifts).to("Mpc").value  # pyright: ignore[reportAttributeAccessIssue]
         )
         for row, d_l in zip(rows, expected):
             self.assertAlmostEqual(row[4], d_l, places=2)

@@ -1,5 +1,8 @@
 """Tests for bagpuss.mdc.pipeline."""
 
+# zarr and h5py index into a union of Group | Array | Dataset; the tests know which.
+# pyright: reportIndexIssue=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportOperatorIssue=false, reportReturnType=false, reportOptionalSubscript=false
+
 import tempfile
 import unittest
 from pathlib import Path

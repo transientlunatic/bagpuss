@@ -1,5 +1,8 @@
 """Tests for bagpuss.mdc.release (assembling the data release)."""
 
+# zarr and h5py index into a union of Group | Array | Dataset; the tests know which.
+# pyright: reportIndexIssue=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportOperatorIssue=false, reportReturnType=false, reportOptionalSubscript=false, reportGeneralTypeIssues=false
+
 import json
 import shutil
 import tarfile
