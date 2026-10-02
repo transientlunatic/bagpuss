@@ -24,6 +24,15 @@ dependencies = [
 bagpuss = "bagpuss.cli:main"
 
 [project.optional-dependencies]
+# The MDC detection stage (SNRs, frames, skymaps). Not needed to generate
+# catalogues and injections. NOTE: `bagpuss.mdc.detection` uses
+# `minke.duty_cycle`, which is not in a minke release yet (minke PR #25), so
+# this needs a minke newer than 2.2.1 once that is released.
+detection = [
+    "minke>=2.2.1",
+    "ligo.skymap>=2.0",
+    "igwn-ligolw>=2.1",
+]
 dev = [
     "ruff>=0.4",
     "mypy>=1.10",
