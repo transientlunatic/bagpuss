@@ -62,6 +62,32 @@ class TestMinkeBackendInjectionParameters(unittest.TestCase):
             self.assertEqual(event, {"inclination": 1.23, "gpstime": 1.2e9})
 
 
+class TestDetectorFrameMasses(unittest.TestCase):
+    """Source-frame masses reach minke redshifted to the detector frame."""
+
+    def test_masses_are_redshifted(self) -> None:
+        seen: dict[str, np.ndarray] = {}
+
+        def read_injection_parameters(path: str, f_ref: float = 20.0) -> list[dict]:
+            import h5py
+
+            with h5py.File(path) as f:
+                seen["m1"] = f["injections/m1_source"][()]
+                seen["m2"] = f["injections/m2_source"][()]
+            return [{"gpstime": 1.2e9}]
+
+        bagpuss_mod = types.ModuleType("minke.bagpuss")
+        bagpuss_mod.read_injection_parameters = read_injection_parameters  # type: ignore[attr-defined]
+        minke_mod = types.ModuleType("minke")
+        minke_mod.bagpuss = bagpuss_mod  # type: ignore[attr-defined]
+        injections = _injections()
+        with mock.patch.dict(sys.modules, {"minke": minke_mod, "minke.bagpuss": bagpuss_mod}):
+            MinkeBackend().injection_parameters(injections, f_ref=20.0)
+        np.testing.assert_allclose(seen["m1"], 30 * 1.1)
+        np.testing.assert_allclose(seen["m2"], 20 * 1.1)
+        np.testing.assert_allclose(injections.m1_source, 30)
+
+
 class _Quantity:
     """Stand-in for an astropy Quantity (just a ``.value``)."""
 

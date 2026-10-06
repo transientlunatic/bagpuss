@@ -17,6 +17,7 @@ backend to :func:`bagpuss.mdc.pipeline.detect_injection_shard`.
 
 from __future__ import annotations
 
+import dataclasses
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -132,14 +133,24 @@ class MinkeBackend:
     def injection_parameters(
         self, injections: InjectionSet, f_ref: float
     ) -> list[dict[str, Any]]:
-        """Convert *injections* via minke's bagpuss HDF5 reader."""
+        """Convert *injections* via minke's bagpuss HDF5 reader.
+
+        Minke injects ``m1_source``/``m2_source`` as the waveform masses, so
+        they are redshifted to the detector frame, ``m * (1 + z)``, first.
+        """
         from minke.bagpuss import (
             read_injection_parameters,
         )
 
+        stretch = 1.0 + np.asarray(injections.redshift)
+        detector_frame = dataclasses.replace(
+            injections,
+            m1_source=np.asarray(injections.m1_source) * stretch,
+            m2_source=np.asarray(injections.m2_source) * stretch,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "injections.h5"
-            injections.to_hdf5(path)
+            detector_frame.to_hdf5(path)
             return list(read_injection_parameters(str(path), f_ref=f_ref))
 
     def abbreviation(self, detector: str) -> str:
