@@ -378,7 +378,10 @@ Source-frame masses `m1_source`, `m2_source`; spin magnitudes `a1`, `a2`;
 position `ra`, `dec` (radians); polarisation `psi`; geocentric GPS merger time
 `geocent_time`; `redshift` and `luminosity_distance` (Mpc) of the host.
 `host_galaxy_index` is the row of `catalogue.h5` of the host galaxy, or `-1`
-if the host is fainter than the survey limit (not in the catalogue).
+if the host is fainter than the survey limit (not in the catalogue). Events
+occur in galaxies with probability proportional to luminosity^{config.host_luminosity_weight:g},
+so whether a host is catalogued follows the luminosity-weighted (not the
+number-weighted) completeness.
 
 Detection results: `network_snr` (optimal network SNR in the detectors that
 were observing, 0 if none were), `detectable` (`network_snr >= {config.snr_threshold}`),

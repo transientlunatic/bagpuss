@@ -331,6 +331,88 @@ class TestDistanceThreshold(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestLuminosityWeightedHosts(unittest.TestCase):
+    """Hosts are drawn with weight L**p, matched in redshift to the trial event."""
+
+    def test_weighted_cdf_zero_power_is_cdf(self) -> None:
+        lum = SchechterLuminosityModel(
+            phi_star=1.6e-2, m_star=-19.66, alpha=-1.16, m_min=-25.0, m_max=-14.0
+        )
+        m = np.linspace(-24, -15, 7)
+        np.testing.assert_allclose(lum.weighted_cdf(m, 0.0), lum.cdf(m))
+
+    def test_weighted_cdf_matches_luminosity_weighted_samples(self) -> None:
+        lum = SchechterLuminosityModel(
+            phi_star=1.6e-2, m_star=-19.66, alpha=-1.16, m_min=-25.0, m_max=-14.0
+        )
+        samples = lum.sample(400_000, np.random.default_rng(1))
+        for threshold in (-21.0, -19.0, -17.0):
+            lum_limit = 10.0 ** (0.4 * (lum.m_sun - threshold))
+            expected = samples[samples >= lum_limit].sum() / samples.sum()
+            got = float(lum.weighted_cdf(np.array([threshold]), 1.0)[0])
+            self.assertAlmostEqual(got, expected, delta=0.01)
+            self.assertGreaterEqual(got, float(lum.cdf(np.array([threshold]))[0]))
+
+    def test_weight_power_sets_host_luminosity(self) -> None:
+        n_cat = 2000
+        z = np.linspace(0.01, 0.29, n_cat)
+        bright = np.arange(n_cat) % 2 == 0
+        catalogue = GalaxyCatalogue(
+            redshifts=z,
+            luminosities=np.where(bright, 9.0, 1.0),
+            apparent_magnitudes=np.full(n_cat, 18.0),
+            ra=np.zeros(n_cat),
+            dec=np.zeros(n_cat),
+        )
+        selection = _make_selection()
+        trial = np.full(20_000, 0.15)
+        for power, expected in ((0.0, 0.5), (1.0, 0.9)):
+            with mock.patch.object(
+                selection,
+                "completeness",
+                side_effect=lambda zz, *a, **k: np.ones_like(zz),
+            ):
+                hosts = sample_host_galaxies(
+                    universe=_make_universe(),
+                    catalogue=catalogue,
+                    selection=selection,
+                    n=len(trial),
+                    rng=np.random.default_rng(3),
+                    redshift=trial,
+                    host_luminosity_weight=power,
+                    n_neighbours=400,
+                )
+            self.assertTrue(np.all(hosts.host_galaxy_index >= 0))
+            frac = bright[hosts.host_galaxy_index].mean()
+            self.assertAlmostEqual(frac, expected, delta=0.02)
+
+    def test_hosts_keep_trial_redshift_distribution(self) -> None:
+        rng = np.random.default_rng(5)
+        n_cat = 50_000
+        catalogue = GalaxyCatalogue(
+            redshifts=np.sort(rng.uniform(0.0, 0.3, n_cat) ** 0.5 * 0.3**0.5),
+            luminosities=rng.uniform(1.0, 10.0, n_cat),
+            apparent_magnitudes=np.full(n_cat, 18.0),
+            ra=np.zeros(n_cat),
+            dec=np.zeros(n_cat),
+        )
+        trial = rng.uniform(0.0, 0.25, 5000)
+        selection = _make_selection()
+        with mock.patch.object(
+            selection, "completeness", side_effect=lambda zz, *a, **k: np.ones_like(zz)
+        ):
+            hosts = sample_host_galaxies(
+                universe=_make_universe(),
+                catalogue=catalogue,
+                selection=selection,
+                n=len(trial),
+                rng=rng,
+                redshift=trial,
+                n_neighbours=50,
+            )
+        np.testing.assert_allclose(hosts.redshift, trial, atol=0.01)
+
+
 class TestSampleHostGalaxies(unittest.TestCase):
     """Tests for the sample_host_galaxies function."""
 

@@ -244,6 +244,7 @@ class MagnitudeLimitedSurvey(SelectionFunction):
         dec: np.ndarray,
         cosmology: FLRW,
         luminosity: LuminosityModel,
+        weight_power: float = 0.0,
     ) -> np.ndarray:
         r"""Return the survey completeness at each given position.
 
@@ -282,6 +283,13 @@ class MagnitudeLimitedSurvey(SelectionFunction):
             gives the fraction of galaxies brighter than a given absolute
             magnitude.
 
+        weight_power : float, optional
+            Exponent ``p`` weighting each galaxy by :math:`L^{p}`.  The default
+            ``0`` is the number-weighted completeness; ``1`` is the fraction
+            of the *luminosity* that is catalogued, which is the probability
+            that the host of an event is catalogued if events occur in
+            proportion to luminosity.
+
         Returns
         -------
         numpy.ndarray
@@ -291,7 +299,7 @@ class MagnitudeLimitedSurvey(SelectionFunction):
         d_L_pc = cosmology.luminosity_distance(redshifts).to("pc").value  # pyright: ignore[reportAttributeAccessIssue]
         distance_modulus = 5.0 * np.log10(d_L_pc / 10.0)
         magnitude_threshold = self.m_lim - distance_modulus
-        return luminosity.cdf(magnitude_threshold)
+        return luminosity.weighted_cdf(magnitude_threshold, weight_power)
 
 
 # ---------------------------------------------------------------------------

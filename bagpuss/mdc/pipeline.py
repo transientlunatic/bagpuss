@@ -676,6 +676,7 @@ def generate_injection_shard(config: MDCConfig, shard_id: int) -> InjectionSet:
         rng=rng,
         t_start=t_start,
         t_end=t_end,
+        host_luminosity_weight=config.host_luminosity_weight,
     )
 
     root = _open_store(config, mode="a")

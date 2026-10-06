@@ -54,6 +54,11 @@ class MDCConfig:
     m_lim : float
         Limiting apparent magnitude of the magnitude-limited survey used
         as the selection function.
+    host_luminosity_weight : float
+        Exponent ``p`` such that BBH mergers occur in galaxies with
+        probability proportional to :math:`L^{p}`. ``1`` (default) is
+        luminosity weighting; ``0`` makes every galaxy equally likely to host.
+        Sets whether an event's host is in the catalogue and which galaxy it is.
     mass_alpha, mass_beta_q, mass_m_min, mass_m_max : float
         :class:`~bagpuss.population.PowerLawPlusPeakMassDistribution`
         hyperparameters.
@@ -169,6 +174,7 @@ class MDCConfig:
     m_sun: float = 4.83
 
     m_lim: float = 19.5
+    host_luminosity_weight: float = 1.0
 
     mass_alpha: float = 3.5
     mass_beta_q: float = 1.4
@@ -233,6 +239,11 @@ class MDCConfig:
                 "trigger_eta_max must be in (0, 0.25] (the symmetric mass ratio "
                 f"is at most 0.25), got {self.trigger_eta_max!r}"
             )
+        if self.host_luminosity_weight < 0.0:
+            raise ValueError(
+                "host_luminosity_weight must be >= 0, got "
+                f"{self.host_luminosity_weight!r}"
+            )
         if self.n_injection_shards < 1:
             raise ValueError(
                 f"n_injection_shards must be >= 1, got {self.n_injection_shards!r}"
@@ -263,6 +274,7 @@ _SCHEMA: dict[str, Any] = {
             "m_sun": "m_sun",
         },
         "selection": {"m_lim": "m_lim"},
+        "host_luminosity_weight": "host_luminosity_weight",
     },
     "population": {
         "mass": {

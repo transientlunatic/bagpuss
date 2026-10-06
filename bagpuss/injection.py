@@ -330,6 +330,36 @@ class DistanceThreshold(Detectable):
 # ---------------------------------------------------------------------------
 
 
+def _draw_catalogue_hosts(
+    catalogue: GalaxyCatalogue,
+    trial_redshift: np.ndarray,
+    weight_power: float,
+    n_neighbours: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Draw a catalogue row per trial redshift, weighted by ``L**weight_power``.
+
+    Each row is drawn from the ``n_neighbours`` catalogue galaxies nearest in
+    redshift to its trial redshift, via the cumulative weights of the
+    redshift-sorted catalogue.
+    """
+    n_cat = len(catalogue)
+    k = max(1, min(n_neighbours, n_cat))
+    order = np.argsort(catalogue.redshifts, kind="stable")
+    z_sorted = catalogue.redshifts[order]
+    lum = catalogue.luminosities[order]
+    weights = (lum / np.median(lum)) ** weight_power
+    cum = np.concatenate([[0.0], np.cumsum(weights)])
+    del lum, weights
+
+    pos = np.searchsorted(z_sorted, trial_redshift)
+    lo = np.clip(pos - k // 2, 0, n_cat - k)
+    hi = lo + k
+    u = cum[lo] + rng.uniform(0.0, 1.0, size=len(lo)) * (cum[hi] - cum[lo])
+    sorted_idx = np.clip(np.searchsorted(cum, u, side="right") - 1, lo, hi - 1)
+    return order[sorted_idx]
+
+
 def sample_host_galaxies(
     universe: Universe,
     catalogue: GalaxyCatalogue,
@@ -337,15 +367,21 @@ def sample_host_galaxies(
     n: int,
     rng: np.random.Generator | None = None,
     redshift: np.ndarray | None = None,
+    host_luminosity_weight: float = 1.0,
+    n_neighbours: int = 200,
 ) -> HostAssignment:
     """Draw host galaxy assignments for ``n`` potential GW events.
 
     For each event a trial host redshift and sky position are drawn from
-    the full galaxy population.  The survey completeness at that redshift
-    determines the probability that the host would have been bright enough
-    to appear in ``catalogue``.  Events that pass this probabilistic cut
-    are assigned a randomly chosen row from the actual catalogue; the rest
-    keep their trial (uncatalogued) position.
+    the full galaxy population.  Events are taken to occur in galaxies with
+    probability proportional to :math:`L^{p}` (``p = host_luminosity_weight``),
+    so the probability that the host is bright enough to appear in
+    ``catalogue`` is the :math:`L^{p}`-weighted survey completeness at the
+    trial redshift.  A catalogued host is then drawn, with weight
+    :math:`L^{p}`, from the ``n_neighbours`` catalogue galaxies closest in
+    redshift to the trial redshift, and the event takes that galaxy's
+    redshift and sky position.  Uncatalogued events keep their trial
+    position.
 
     Parameters
     ----------
@@ -374,6 +410,14 @@ def sample_host_galaxies(
         :func:`~bagpuss.population.sample_merger_redshifts`, as
         :func:`build_injection_set` does -- while still drawing sky
         positions and evaluating catalogue completeness the usual way.
+    host_luminosity_weight : float, optional
+        Exponent ``p``: events occur in galaxies with probability
+        :math:`\propto L^{p}`.  ``1`` (default) is luminosity weighting,
+        ``0`` is number weighting (every galaxy equally likely to host).
+    n_neighbours : int, optional
+        Size of the redshift window (in catalogue galaxies, sorted by
+        redshift) a catalogued host is drawn from.  The window is
+        negligibly narrow wherever the catalogue is dense.
 
     Returns
     -------
@@ -383,12 +427,11 @@ def sample_host_galaxies(
 
     Notes
     -----
-    A catalogued event's host is a uniformly random catalogue row, whatever
-    its trial redshift. If ``redshift`` is drawn from a merger-rate model, the
-    redshifts of catalogued events therefore follow the catalogue's own
-    distribution rather than the rate's :math:`R(z)/(1+z)` weighting (for a
-    constant rate, a factor of :math:`(1+z)`); uncatalogued events do follow it.
-    The effect is small unless catalogued hosts are common.
+    Because a catalogued host is drawn from galaxies at (nearly) the trial
+    redshift, catalogued events follow the same rate-weighted redshift
+    distribution as uncatalogued ones.  Memory: the catalogue's redshift
+    ordering and cumulative weights are built per call (about three extra
+    float/int arrays of ``len(catalogue)`` entries).
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -404,7 +447,12 @@ def sample_host_galaxies(
     ra, dec = universe.structure.sample_positions(n, rng)
 
     completeness = selection.completeness(
-        redshift, ra, dec, cosmology, universe.luminosity
+        redshift,
+        ra,
+        dec,
+        cosmology,
+        universe.luminosity,
+        weight_power=host_luminosity_weight,
     )
     host_observed = rng.uniform(0.0, 1.0, size=n) < completeness
 
@@ -413,7 +461,13 @@ def sample_host_galaxies(
     # With an empty catalogue nothing can be catalogued: events flagged as
     # observed keep their trial (uncatalogued) position.
     if n_observed > 0 and n_cat > 0:
-        cat_idx = rng.integers(0, n_cat, size=n_observed)
+        cat_idx = _draw_catalogue_hosts(
+            catalogue,
+            redshift[host_observed],
+            host_luminosity_weight,
+            n_neighbours,
+            rng,
+        )
         redshift[host_observed] = catalogue.redshifts[cat_idx]
         ra[host_observed] = catalogue.ra[cat_idx]
         dec[host_observed] = catalogue.dec[cat_idx]
@@ -528,6 +582,7 @@ def create_injection_set(
     rng: np.random.Generator | None = None,
     t_start: float = GPS_O3_START,
     t_end: float = GPS_O3_END,
+    host_luminosity_weight: float = 1.0,
 ) -> InjectionSet:
     """Create a simulated GW injection set from the full galaxy population.
 
@@ -565,6 +620,9 @@ def create_injection_set(
     t_end : float, optional
         End of the observation window in GPS seconds.  Defaults to the O3
         end (2020-03-27).
+    host_luminosity_weight : float, optional
+        Exponent ``p`` of the :math:`L^{p}` host weighting; see
+        :func:`sample_host_galaxies`.
 
     Returns
     -------
@@ -575,7 +633,14 @@ def create_injection_set(
         rng = np.random.default_rng()
 
     bbh = population.sample(n_draw, rng)
-    hosts = sample_host_galaxies(universe, catalogue, selection, n_draw, rng)
+    hosts = sample_host_galaxies(
+        universe,
+        catalogue,
+        selection,
+        n_draw,
+        rng,
+        host_luminosity_weight=host_luminosity_weight,
+    )
     return assemble_injection_set(
         hosts, bbh, universe.cosmology, detectable, rng, t_start, t_end
     )
@@ -591,6 +656,7 @@ def build_injection_set(
     rng: np.random.Generator | None = None,
     t_start: float = GPS_O3_START,
     t_end: float = GPS_O3_END,
+    host_luminosity_weight: float = 1.0,
 ) -> InjectionSet:
     r"""Create a Poisson realisation of the GW injection set from ``rate``.
 
@@ -635,6 +701,9 @@ def build_injection_set(
     t_end : float, optional
         End of the observation window in GPS seconds.  Defaults to the O3
         end (2020-03-27).
+    host_luminosity_weight : float, optional
+        Exponent ``p`` of the :math:`L^{p}` host weighting; see
+        :func:`sample_host_galaxies`.
 
     Returns
     -------
@@ -656,7 +725,13 @@ def build_injection_set(
     )
     bbh = population.sample(n, rng)
     hosts = sample_host_galaxies(
-        universe, catalogue, selection, n, rng, redshift=redshift
+        universe,
+        catalogue,
+        selection,
+        n,
+        rng,
+        redshift=redshift,
+        host_luminosity_weight=host_luminosity_weight,
     )
     return assemble_injection_set(
         hosts, bbh, universe.cosmology, detectable, rng, t_start, t_end

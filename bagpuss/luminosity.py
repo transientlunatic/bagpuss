@@ -159,6 +159,25 @@ class SchechterLuminosityModel(LuminosityModel):
         magnitude = np.asarray(magnitude, dtype=float)
         return np.asarray(np.interp(magnitude, self._m_grid, self._cdf_grid))
 
+    def weighted_cdf(self, magnitude: np.ndarray, weight_power: float) -> np.ndarray:
+        r"""Return the fraction of :math:`L^{p}`-weighted galaxies brighter than ``magnitude``.
+
+        With ``weight_power`` :math:`p = 0` this is :meth:`cdf`. With
+        :math:`p = 1` it is the fraction of the total luminosity emitted by
+        galaxies at or brighter than ``magnitude``, i.e. the completeness
+        for a population that hosts events in proportion to luminosity.
+        """
+        magnitude = np.asarray(magnitude, dtype=float)
+        if weight_power == 0.0:
+            return self.cdf(magnitude)
+        pdf = self._model(self._m_grid) * 10.0 ** (
+            -0.4 * weight_power * (self._m_grid - self.m_star)
+        )
+        cum = np.concatenate(
+            [[0.0], np.cumsum(0.5 * (pdf[:-1] + pdf[1:]) * np.diff(self._m_grid))]
+        )
+        return np.asarray(np.interp(magnitude, self._m_grid, cum / cum[-1]))
+
     def _magnitudes_to_luminosities(self, magnitudes: np.ndarray) -> np.ndarray:
         """Convert absolute magnitudes to solar luminosities."""
         return 10.0 ** (0.4 * (self.m_sun - magnitudes))
