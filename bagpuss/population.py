@@ -256,6 +256,11 @@ class PopulationModel:
 # ---------------------------------------------------------------------------
 
 
+def _trapezoid(y: np.ndarray, x: np.ndarray) -> float:
+    """Trapezoidal integral of ``y`` over ``x`` (``np.trapz`` was renamed in NumPy 2)."""
+    return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)))
+
+
 def _smoothing(m: np.ndarray, m_min: float, delta_m: float) -> np.ndarray:
     r"""Tapering window that smoothly turns on at ``m_min``.
 
@@ -366,12 +371,23 @@ class PowerLawPlusPeakMassDistribution(MassDistribution):
         self.delta_m = delta_m
 
         self._m1_grid = np.linspace(m_min, m_max, _GRID_SIZE)
+        self._power_law_norm = _trapezoid(self._m1_grid ** (-alpha), self._m1_grid)
+        self._gaussian_norm = _trapezoid(
+            np.exp(-0.5 * ((self._m1_grid - mu_m) / sigma_m) ** 2), self._m1_grid
+        )
         self._m1_cdf = self._build_m1_cdf()
 
     def _m1_pdf(self, m1: np.ndarray) -> np.ndarray:
-        """Evaluate the (unnormalised) primary-mass PDF."""
-        power_law = m1 ** (-self.alpha)
-        gaussian = np.exp(-0.5 * ((m1 - self.mu_m) / self.sigma_m) ** 2)
+        """Evaluate the (unnormalised) primary-mass PDF.
+
+        The power law and the Gaussian peak are each normalised over
+        ``[m_min, m_max]`` before mixing, so ``lambda_peak`` is the fraction of
+        events in the peak (before the low-mass smoothing is applied).
+        """
+        power_law = m1 ** (-self.alpha) / self._power_law_norm
+        gaussian = (
+            np.exp(-0.5 * ((m1 - self.mu_m) / self.sigma_m) ** 2) / self._gaussian_norm
+        )
         pdf: np.ndarray = (
             (1.0 - self.lambda_peak) * power_law + self.lambda_peak * gaussian
         ) * _smoothing(m1, self.m_min, self.delta_m)
