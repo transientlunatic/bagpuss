@@ -218,6 +218,7 @@ run-specific file only needs to override what differs from the defaults
        phi_star: 1.61e-2
      selection:
        m_lim: 19.5
+     host_luminosity_weight: 1.0  # events occur in galaxies with probability ~ L^p
 
    population:
      rate_density: 2.4e-8  # Mpc^-3 yr^-1
@@ -396,8 +397,9 @@ export-glade``) produces a collaborator-facing galaxy catalogue product,
 structured similarly to the real `GLADE+
 <https://glade.elte.hu/>`_ catalogue (Dálya et al. 2022) for familiarity —
 a flat, space-delimited ASCII file, one row per galaxy, plus a companion
-``README.txt`` and an exact ``(z, completeness)`` table
-(``completeness.dat``). This is a **reduced** schema, not a full clone:
+``README.txt`` and an exact ``(z, completeness, completeness_host)`` table
+(``completeness.dat``; the last column is the completeness for event hosts under
+``galaxies.host_luminosity_weight``). This is a **reduced** schema, not a full clone:
 bagpuss only simulates a single photometric band and knows every value
 exactly (no measurement error), so it does not fabricate GLADE+'s other
 columns (multi-band photometry, cross-catalogue identifiers, stellar
