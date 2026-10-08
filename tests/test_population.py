@@ -264,6 +264,26 @@ class TestPowerLawPlusPeakMassDistribution(unittest.TestCase):
         self.assertTrue(np.all(m2 >= _MASS_PARAMS_FULL["m_min"] - 1e-10))
         self.assertTrue(np.all(m1 <= _MASS_PARAMS_FULL["m_max"] + 1e-10))
 
+    def test_lambda_peak_is_mixture_fraction(self) -> None:
+        """lambda_peak is the fraction of primaries drawn from the Gaussian peak."""
+        params = {**_MASS_PARAMS_FULL, "delta_m": 0.0}
+        m = PowerLawPlusPeakMassDistribution(**params)
+        m1 = m._sample_m1(400_000, np.random.default_rng(7))
+
+        lo, hi = params["mu_m"] - 5 * params["sigma_m"], params["mu_m"] + 5 * params["sigma_m"]
+        a, m_min, m_max = params["alpha"], params["m_min"], params["m_max"]
+
+        def pl_cdf(x: float) -> float:
+            return (m_min ** (1 - a) - x ** (1 - a)) / (m_min ** (1 - a) - m_max ** (1 - a))
+
+        lam = params["lambda_peak"]
+        expected_in_window = lam + (1 - lam) * (pl_cdf(hi) - pl_cdf(lo))
+        observed = np.mean((m1 > lo) & (m1 < hi))
+        self.assertAlmostEqual(observed, expected_in_window, delta=0.003)
+
+        # Most primaries lie in the steep power law, not the peak
+        self.assertGreater(np.mean(m1 < 15.0), 0.85)
+
     def test_masses_are_positive(self) -> None:
         """All sampled masses are strictly positive."""
         m = _make_mass()

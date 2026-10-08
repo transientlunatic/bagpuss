@@ -18,30 +18,26 @@ Host galaxy assignment
 ^^^^^^^^^^^^^^^^^^^^^^
 
 Each BBH event first gets a *trial* host: a redshift and sky position drawn
-from the simulated universe's full galaxy population. The survey's completeness
-at that redshift is the probability that such a host would be bright enough to
-appear in the :class:`~bagpuss.catalogue.GalaxyCatalogue`. Events that pass this
-probabilistic cut are assigned a randomly chosen row of the catalogue (and
-inherit its sky position and redshift; ``host_galaxy_index`` records the row);
-the rest keep their trial position and are marked ``host_galaxy_index == -1``.
-The luminosity distance is then computed from the redshift via the background
-cosmology.
+from the simulated universe's full galaxy population. Events are taken to occur
+in galaxies with probability proportional to :math:`L^{p}` (``p`` is the
+``host_luminosity_weight`` argument, default ``1``; ``0`` gives equal weight to
+every galaxy). The :math:`L^{p}`-weighted survey completeness at the trial
+redshift is then the probability that the host is bright enough to appear in the
+:class:`~bagpuss.catalogue.GalaxyCatalogue`. Events that pass this probabilistic
+cut are assigned a catalogue galaxy drawn, with weight :math:`L^{p}`, from the
+``n_neighbours`` catalogue galaxies closest in redshift to the trial redshift;
+they inherit its sky position and redshift (``host_galaxy_index`` records the
+row). The rest keep their trial position and are marked
+``host_galaxy_index == -1``. The luminosity distance is then computed from the
+redshift via the background cosmology.
 
+Because a catalogued host is matched in redshift to the trial event, catalogued
+and uncatalogued events share the same (rate-weighted) redshift distribution.
 This is unbiased if the catalogue was built from the same universe and
-selection, and it implicitly assumes the merger rate is proportional to galaxy
-number. For stellar-mass- or star-formation-rate-weighted host assignment,
-subclass or wrap :func:`~bagpuss.injection.sample_host_galaxies`.
-
-.. note::
-
-   When the event redshifts are drawn from a merger-rate model (as in
-   :func:`~bagpuss.injection.build_injection_set`), a catalogued event's host is
-   a *uniformly random* catalogue row, so the redshifts of catalogued events
-   follow the catalogue's own redshift distribution rather than the
-   :math:`R(z)/(1+z)` weighting of the event distribution (uncatalogued events
-   do follow it). For a constant rate this is a factor of :math:`(1+z)` in the
-   catalogued events' redshift distribution, and it only matters where
-   catalogued hosts are common, i.e. at low redshift or with a deep survey.
+selection. For stellar-mass- or star-formation-rate-weighted host assignment,
+subclass or wrap :func:`~bagpuss.injection.sample_host_galaxies`. The exported
+GLADE-style completeness table includes the matching host-weighted completeness
+(see :func:`~bagpuss.glade_export.write_completeness_curve`).
 
 :func:`~bagpuss.injection.build_injection_set` does the same but draws the
 number of events from a :class:`~bagpuss.population.MergerRate` and an

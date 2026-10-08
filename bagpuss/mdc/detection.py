@@ -17,6 +17,7 @@ backend to :func:`bagpuss.mdc.pipeline.detect_injection_shard`.
 
 from __future__ import annotations
 
+import dataclasses
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -54,8 +55,8 @@ def _duty_cycle() -> Any:  # noqa: ANN401
         from minke import duty_cycle
     except ImportError as exc:
         raise ImportError(
-            "the detection stage needs minke.duty_cycle, which is in minke releases "
-            "after 2.2.1 (not in 2.2.1 itself); install a newer minke"
+            "the detection stage needs minke.duty_cycle, which is in minke 2.3.0 and "
+            "later (not in 2.2.1); install a newer minke"
         ) from exc
     return duty_cycle
 
@@ -132,23 +133,25 @@ class MinkeBackend:
     def injection_parameters(
         self, injections: InjectionSet, f_ref: float
     ) -> list[dict[str, Any]]:
-        """Convert *injections* via minke's bagpuss HDF5 reader."""
+        """Convert *injections* via minke's bagpuss HDF5 reader.
+
+        Minke injects ``m1_source``/``m2_source`` as the waveform masses, so
+        they are redshifted to the detector frame, ``m * (1 + z)``, first.
+        """
         from minke.bagpuss import (
             read_injection_parameters,
         )
 
+        stretch = 1.0 + np.asarray(injections.redshift)
+        detector_frame = dataclasses.replace(
+            injections,
+            m1_source=np.asarray(injections.m1_source) * stretch,
+            m2_source=np.asarray(injections.m2_source) * stretch,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "injections.h5"
-            injections.to_hdf5(path)
-            params = list(read_injection_parameters(str(path), f_ref=f_ref))
-        # minke's reader (as of 2.2.1) returns the L-frame inclination as
-        # ``iota``, but its waveform models read ``inclination`` (default 0),
-        # so without this rename every event is injected face-on and its SNR
-        # is inflated by an orientation-dependent factor of ~1.4-4x.
-        for event in params:
-            if "iota" in event:
-                event["inclination"] = event.pop("iota")
-        return params
+            detector_frame.to_hdf5(path)
+            return list(read_injection_parameters(str(path), f_ref=f_ref))
 
     def abbreviation(self, detector: str) -> str:
         """Return *detector*'s abbreviation via minke."""

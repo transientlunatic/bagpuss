@@ -169,7 +169,7 @@ class TestWriteCompletenessCurve(unittest.TestCase):
             for line in f:
                 if line.startswith("#") or not line.strip():
                     continue
-                z, c = line.split()
+                z, c, _ = line.split()
                 redshifts.append(float(z))
                 completeness.append(float(c))
         redshifts_arr = np.array(redshifts)
@@ -192,14 +192,39 @@ class TestWriteCompletenessCurve(unittest.TestCase):
             z_max=0.5,
             path=self.path,
             n_points=50,
+            host_weight_power=1.0,
         )
         with open(self.path) as f:
-            values = [
-                float(line.split()[1])
+            rows = [
+                [float(x) for x in line.split()[1:]]
                 for line in f
                 if not line.startswith("#") and line.strip()
             ]
-        self.assertTrue(all(0.0 <= v <= 1.0 for v in values))
+        self.assertTrue(all(0.0 <= v <= 1.0 for row in rows for v in row))
+
+    def test_host_column_is_luminosity_weighted(self) -> None:
+        """Column 3 is the L^p-weighted completeness, at least the number-weighted one."""
+        write_completeness_curve(
+            self.selection,
+            self.luminosity,
+            Planck18,
+            z_max=0.5,
+            path=self.path,
+            n_points=50,
+            host_weight_power=1.0,
+        )
+        data = np.loadtxt(self.path)
+        z = data[1:, 0]
+        expected = self.selection.completeness(
+            z,
+            np.zeros_like(z),
+            np.zeros_like(z),
+            Planck18,
+            self.luminosity,
+            weight_power=1.0,
+        )
+        np.testing.assert_allclose(data[1:, 2], expected, atol=5e-6)
+        self.assertTrue(np.all(data[:, 2] >= data[:, 1] - 1e-6))
 
 
 class TestWriteReadme(unittest.TestCase):

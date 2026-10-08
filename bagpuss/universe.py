@@ -222,6 +222,20 @@ class LuminosityModel(ABC):
             brighter), shape ``(n,)``.  Values are in ``[0, 1]``.
         """
 
+    def weighted_cdf(self, magnitude: np.ndarray, weight_power: float) -> np.ndarray:
+        r"""Return the :math:`L^{p}`-weighted analogue of :meth:`cdf`.
+
+        Fraction of the :math:`L^{p}`-weighted population (``p`` is
+        ``weight_power``) with absolute magnitude at or brighter than
+        ``magnitude``. Models that do not support ``weight_power != 0`` need
+        not override this.
+        """
+        if weight_power != 0.0:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support weighted completeness"
+            )
+        return self.cdf(magnitude)
+
     @abstractmethod
     def sample_brighter_than(
         self,

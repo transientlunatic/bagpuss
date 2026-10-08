@@ -182,8 +182,15 @@ def write_completeness_curve(
     z_max: float,
     path: str | Path,
     n_points: int = 1000,
+    host_weight_power: float = 0.0,
 ) -> None:
-    """Write a companion ``(z, completeness)`` table.
+    """Write a companion ``(z, completeness, completeness_host)`` table.
+
+    ``completeness`` is the fraction of *galaxies* passing the selection;
+    ``completeness_host`` is the :math:`L^{p}`-weighted fraction
+    (``p = host_weight_power``), i.e. the probability that the host of an
+    event occurring in proportion to :math:`L^{p}` is catalogued. The two
+    coincide for ``p = 0``.
 
     Unlike real GLADE+, where completeness must be estimated empirically,
     bagpuss knows the true luminosity function and selection function, so
@@ -204,6 +211,8 @@ def write_completeness_curve(
         Output file path. Overwritten if it exists.
     n_points : int, optional
         Number of evenly-spaced redshift grid points. Default 1000.
+    host_weight_power : float, optional
+        Exponent ``p`` of the host weighting. Default 0 (number weighting).
     """
     redshifts = np.linspace(0.0, z_max, n_points)
     completeness = selection.completeness(
@@ -213,10 +222,20 @@ def write_completeness_curve(
         cosmology=cosmology,
         luminosity=luminosity,
     )
+    completeness_host = selection.completeness(
+        redshifts=redshifts,
+        ra=np.zeros_like(redshifts),
+        dec=np.zeros_like(redshifts),
+        cosmology=cosmology,
+        luminosity=luminosity,
+        weight_power=host_weight_power,
+    )
     with open(path, "w") as fileobj:
-        fileobj.write("# z completeness\n")
-        for z, c in zip(redshifts, completeness):
-            fileobj.write(f"{z:.6f} {c:.6f}\n")
+        fileobj.write(
+            f"# z completeness completeness_host (host weight L^{host_weight_power:g})\n"
+        )
+        for z, c, ch in zip(redshifts, completeness, completeness_host):
+            fileobj.write(f"{z:.6f} {c:.6f} {ch:.6f}\n")
 
 
 def write_readme(
@@ -229,6 +248,7 @@ def write_readme(
     z_max: float,
     catalogue_filename: str = "catalogue.dat",
     completeness_filename: str = "completeness.dat",
+    host_weight_power: float = 0.0,
 ) -> None:
     """Write the GLADE+-style companion column-description document.
 
@@ -248,6 +268,9 @@ def write_readme(
         Maximum redshift of the simulated volume.
     catalogue_filename, completeness_filename : str, optional
         Filenames of the two companion data files, referenced in the text.
+    host_weight_power : float, optional
+        Exponent ``p`` such that events occur in galaxies with probability
+        proportional to :math:`L^{p}`. Default 0.
     """
     column_lines = "\n".join(
         f"# Column {i + 1}: {name} -- {desc}"
@@ -281,10 +304,16 @@ Provenance:
 
 Files:
 - {catalogue_filename}: the galaxy catalogue, one row per galaxy.
-- {completeness_filename}: (z, completeness) table -- the exact
-  probability that a galaxy at redshift z would pass this catalogue's
-  selection function, computed analytically from the known luminosity
-  function (see bagpuss.catalogue.MagnitudeLimitedSurvey.completeness).
+- {completeness_filename}: (z, completeness, completeness_host) table,
+  computed analytically from the known luminosity function (see
+  bagpuss.catalogue.MagnitudeLimitedSurvey.completeness). Column 2 is the
+  exact probability that a galaxy at redshift z would pass this catalogue's
+  selection function. Column 3 is the probability that the HOST of a merger
+  at redshift z is in the catalogue: mergers occur in galaxies with
+  probability proportional to luminosity^{host_weight_power:g}, so this is the
+  luminosity^{host_weight_power:g}-weighted fraction passing the selection
+  (equal to column 2 when the exponent is 0). A dark-siren analysis should
+  use column 3 as the catalogue completeness for events.
   Real GLADE+ users must estimate this empirically; this is exact.
 
 Column description ({catalogue_filename}, space-delimited, no header row):

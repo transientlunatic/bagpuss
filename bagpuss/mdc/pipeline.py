@@ -676,6 +676,7 @@ def generate_injection_shard(config: MDCConfig, shard_id: int) -> InjectionSet:
         rng=rng,
         t_start=t_start,
         t_end=t_end,
+        host_luminosity_weight=config.host_luminosity_weight,
     )
 
     root = _open_store(config, mode="a")
@@ -1266,6 +1267,7 @@ def export_glade_catalogue(config: MDCConfig, out_dir: str | Path) -> dict[str, 
         universe.cosmology,
         config.z_max,
         out_dir / "completeness.dat",
+        host_weight_power=config.host_luminosity_weight,
     )
     glade_export.write_readme(
         out_dir / "README.txt",
@@ -1276,6 +1278,7 @@ def export_glade_catalogue(config: MDCConfig, out_dir: str | Path) -> dict[str, 
         z_max=config.z_max,
         catalogue_filename="catalogue.dat",
         completeness_filename="completeness.dat",
+        host_weight_power=config.host_luminosity_weight,
     )
 
     return {
