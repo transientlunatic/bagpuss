@@ -160,7 +160,7 @@ class SchechterLuminosityModel(LuminosityModel):
         return np.asarray(np.interp(magnitude, self._m_grid, self._cdf_grid))
 
     def weighted_cdf(self, magnitude: np.ndarray, weight_power: float) -> np.ndarray:
-        r"""Return the fraction of :math:`L^{p}`-weighted galaxies brighter than ``magnitude``.
+        r"""Return the :math:`L^{p}`-weighted fraction brighter than ``magnitude``.
 
         With ``weight_power`` :math:`p = 0` this is :meth:`cdf`. With
         :math:`p = 1` it is the fraction of the total luminosity emitted by

@@ -336,6 +336,7 @@ class TestLuminosityWeightedHosts(unittest.TestCase):
     """Catalogued hosts are drawn with weight L**p times the merger rate."""
 
     def test_weighted_cdf_zero_power_is_cdf(self) -> None:
+        """With p = 0 the weighted CDF is the plain CDF."""
         lum = SchechterLuminosityModel(
             phi_star=1.6e-2, m_star=-19.66, alpha=-1.16, m_min=-25.0, m_max=-14.0
         )
@@ -343,6 +344,7 @@ class TestLuminosityWeightedHosts(unittest.TestCase):
         np.testing.assert_allclose(lum.weighted_cdf(m, 0.0), lum.cdf(m))
 
     def test_weighted_cdf_matches_luminosity_weighted_samples(self) -> None:
+        """The weighted CDF matches the luminosity fraction of drawn samples."""
         lum = SchechterLuminosityModel(
             phi_star=1.6e-2, m_star=-19.66, alpha=-1.16, m_min=-25.0, m_max=-14.0
         )
@@ -355,6 +357,7 @@ class TestLuminosityWeightedHosts(unittest.TestCase):
             self.assertGreaterEqual(got, float(lum.cdf(np.array([threshold]))[0]))
 
     def test_weight_power_sets_host_luminosity(self) -> None:
+        """Raising the weight power raises the luminosity of catalogued hosts."""
         n_cat = 2000
         z = np.linspace(0.01, 0.29, n_cat)
         bright = np.arange(n_cat) % 2 == 0

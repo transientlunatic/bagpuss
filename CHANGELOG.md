@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+Injection sets, and therefore MDC releases, produced by 0.2.0 are not
+reproduced by this version for the same seed: the primary-mass distribution,
+the detector-frame masses and the host assignment have all changed.
+
+### Added
+- `host_luminosity_weight` (`MDCConfig`, `galaxies.host_luminosity_weight` in
+  the YAML, and the injection builders): events occur in galaxies with
+  probability proportional to `L**p`. The default is `1`; `0` recovers number
+  weighting. The probability that an event's host is catalogued is the
+  `L**p`-weighted completeness.
+- `weighted_cdf` on luminosity models, and a `weight_power` argument to
+  `MagnitudeLimitedSurvey.completeness`.
+- `completeness.dat` from the GLADE-style export gains a host-weighted column,
+  `completeness_host`; the exported README, release README and docs describe
+  the weighting.
 
 ### Changed
 - **Breaking:** `sample_host_galaxies` takes `rate` (a `MergerRate`) in place
@@ -8,8 +24,24 @@
   host is drawn from the whole catalogue with weight `L**p * R(z)/(1+z)`,
   which gives the rate-weighted redshift distribution exactly, instead of
   from the 200 catalogue galaxies nearest the trial redshift (which widened
-  to dz ~ 0.1 where the catalogue is sparse). Injection sets change for a
-  given seed.
+  to dz ~ 0.1 where the catalogue is sparse).
+- Hosted events no longer take a uniformly random catalogue row, whose
+  redshifts followed the catalogue `n(z)` rather than the rate-weighted
+  distribution.
+- The `detection` extra requires minke 2.3.0, which contains the duty-cycle
+  support, the corrected O4 PSDs and the inclination fix; the workaround that
+  renamed `iota` to `inclination` is removed.
+
+### Fixed
+- The power-law-plus-peak primary-mass distribution mixed an unnormalised power
+  law with an unnormalised Gaussian of unit peak height, so `lambda_peak` was
+  not the peak fraction: with the default `lambda_peak = 0.03` about 97% of
+  events were in the peak. Both components are now normalised over
+  `[m_min, m_max]` before mixing.
+- Injected source-frame masses are redshifted to the detector frame before
+  they are handed to minke, which injects them as waveform masses at the true
+  luminosity distance. Previously the chirp mass was low by `1 + z`.
+- Lint, format and type checks (`ruff`, `mypy`, `pyright`) pass again.
 
 ## 0.2.0
 

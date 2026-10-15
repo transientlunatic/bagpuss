@@ -232,7 +232,8 @@ def write_completeness_curve(
     )
     with open(path, "w") as fileobj:
         fileobj.write(
-            f"# z completeness completeness_host (host weight L^{host_weight_power:g})\n"
+            f"# z completeness completeness_host "
+            f"(host weight L^{host_weight_power:g})\n"
         )
         for z, c, ch in zip(redshifts, completeness, completeness_host):
             fileobj.write(f"{z:.6f} {c:.6f} {ch:.6f}\n")
