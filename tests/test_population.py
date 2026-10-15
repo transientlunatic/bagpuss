@@ -270,11 +270,16 @@ class TestPowerLawPlusPeakMassDistribution(unittest.TestCase):
         m = PowerLawPlusPeakMassDistribution(**params)
         m1 = m._sample_m1(400_000, np.random.default_rng(7))
 
-        lo, hi = params["mu_m"] - 5 * params["sigma_m"], params["mu_m"] + 5 * params["sigma_m"]
+        lo, hi = (
+            params["mu_m"] - 5 * params["sigma_m"],
+            params["mu_m"] + 5 * params["sigma_m"],
+        )
         a, m_min, m_max = params["alpha"], params["m_min"], params["m_max"]
 
         def pl_cdf(x: float) -> float:
-            return (m_min ** (1 - a) - x ** (1 - a)) / (m_min ** (1 - a) - m_max ** (1 - a))
+            return (m_min ** (1 - a) - x ** (1 - a)) / (
+                m_min ** (1 - a) - m_max ** (1 - a)
+            )
 
         lam = params["lambda_peak"]
         expected_in_window = lam + (1 - lam) * (pl_cdf(hi) - pl_cdf(lo))

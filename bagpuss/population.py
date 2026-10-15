@@ -257,7 +257,7 @@ class PopulationModel:
 
 
 def _trapezoid(y: np.ndarray, x: np.ndarray) -> float:
-    """Trapezoidal integral of ``y`` over ``x`` (``np.trapz`` was renamed in NumPy 2)."""
+    """Trapezoidal integral of ``y`` over ``x`` (``np.trapz`` is gone in NumPy 2)."""
     return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)))
 
 

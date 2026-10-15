@@ -203,7 +203,7 @@ class TestWriteCompletenessCurve(unittest.TestCase):
         self.assertTrue(all(0.0 <= v <= 1.0 for row in rows for v in row))
 
     def test_host_column_is_luminosity_weighted(self) -> None:
-        """Column 3 is the L^p-weighted completeness, at least the number-weighted one."""
+        """Column 3 is the L^p-weighted completeness, >= the number-weighted one."""
         write_completeness_curve(
             self.selection,
             self.luminosity,

@@ -431,9 +431,7 @@ def sample_host_galaxies(
     if rate is None:
         redshift = universe.structure.sample_redshifts(n, cosmology, rng)
     else:
-        redshift = sample_merger_redshifts(
-            universe.structure, cosmology, rate, n, rng
-        )
+        redshift = sample_merger_redshifts(universe.structure, cosmology, rate, n, rng)
     ra, dec = universe.structure.sample_positions(n, rng)
 
     completeness = selection.completeness(
