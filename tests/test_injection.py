@@ -29,6 +29,7 @@ from bagpuss.population import (
     PopulationModel,
     PowerLawPlusPeakMassDistribution,
     expected_n_mergers,
+    sample_merger_redshifts,
 )
 from bagpuss.universe import PointProcess, Universe
 
@@ -332,7 +333,7 @@ class TestDistanceThreshold(unittest.TestCase):
 
 
 class TestLuminosityWeightedHosts(unittest.TestCase):
-    """Hosts are drawn with weight L**p, matched in redshift to the trial event."""
+    """Catalogued hosts are drawn with weight L**p times the merger rate."""
 
     def test_weighted_cdf_zero_power_is_cdf(self) -> None:
         lum = SchechterLuminosityModel(
@@ -365,7 +366,6 @@ class TestLuminosityWeightedHosts(unittest.TestCase):
             dec=np.zeros(n_cat),
         )
         selection = _make_selection()
-        trial = np.full(20_000, 0.15)
         for power, expected in ((0.0, 0.5), (1.0, 0.9)):
             with mock.patch.object(
                 selection,
@@ -376,27 +376,25 @@ class TestLuminosityWeightedHosts(unittest.TestCase):
                     universe=_make_universe(),
                     catalogue=catalogue,
                     selection=selection,
-                    n=len(trial),
+                    n=20_000,
                     rng=np.random.default_rng(3),
-                    redshift=trial,
                     host_luminosity_weight=power,
-                    n_neighbours=400,
                 )
             self.assertTrue(np.all(hosts.host_galaxy_index >= 0))
             frac = bright[hosts.host_galaxy_index].mean()
             self.assertAlmostEqual(frac, expected, delta=0.02)
 
-    def test_hosts_keep_trial_redshift_distribution(self) -> None:
+    def test_catalogued_hosts_follow_merger_rate(self) -> None:
+        """Hosts are weighted by R(z)/(1+z), not drawn as the catalogue is."""
         rng = np.random.default_rng(5)
         n_cat = 50_000
         catalogue = GalaxyCatalogue(
-            redshifts=np.sort(rng.uniform(0.0, 0.3, n_cat) ** 0.5 * 0.3**0.5),
-            luminosities=rng.uniform(1.0, 10.0, n_cat),
+            redshifts=rng.uniform(0.0, 3.0, n_cat),
+            luminosities=np.ones(n_cat),
             apparent_magnitudes=np.full(n_cat, 18.0),
             ra=np.zeros(n_cat),
             dec=np.zeros(n_cat),
         )
-        trial = rng.uniform(0.0, 0.25, 5000)
         selection = _make_selection()
         with mock.patch.object(
             selection, "completeness", side_effect=lambda zz, *a, **k: np.ones_like(zz)
@@ -405,12 +403,14 @@ class TestLuminosityWeightedHosts(unittest.TestCase):
                 universe=_make_universe(),
                 catalogue=catalogue,
                 selection=selection,
-                n=len(trial),
+                n=40_000,
                 rng=rng,
-                redshift=trial,
-                n_neighbours=50,
+                rate=ConstantMergerRate(1e-8),
             )
-        np.testing.assert_allclose(hosts.redshift, trial, atol=0.01)
+        # Uniform catalogue weighted by 1/(1+z) on [0, 3]: E[z] = 3/ln 4 - 1.
+        self.assertAlmostEqual(
+            hosts.redshift.mean(), 3.0 / np.log(4.0) - 1.0, delta=0.02
+        )
 
 
 class TestSampleHostGalaxies(unittest.TestCase):
@@ -554,39 +554,24 @@ class TestSampleHostGalaxies(unittest.TestCase):
             result.redshift[observed], catalogue.redshifts[idx]
         )
 
-    def test_redshift_override_used_verbatim_for_uncatalogued_hosts(self) -> None:
-        """A precomputed redshift array is used in place of structure sampling."""
+    def test_rate_sets_uncatalogued_redshifts(self) -> None:
+        """With a rate, trial redshifts come from sample_merger_redshifts."""
         universe = _make_universe()
         selection = _make_selection(m_lim=-100.0)  # nothing gets catalogued
         catalogue = _make_consistent_catalogue(universe, selection)
-        preset_redshift = np.array([0.05, 0.1, 0.15, 0.2])
+        rate = ConstantMergerRate(1e-8)
         result = sample_host_galaxies(
             universe=universe,
             catalogue=catalogue,
             selection=selection,
-            n=999,  # deliberately wrong; redshift's length should win
+            n=50,
             rng=np.random.default_rng(0),
-            redshift=preset_redshift,
+            rate=rate,
         )
-        self.assertEqual(len(result), 4)
-        np.testing.assert_array_equal(result.redshift, preset_redshift)
-
-    def test_redshift_override_not_mutated(self) -> None:
-        """The caller's redshift array is not mutated in place."""
-        universe = _make_universe()
-        selection = _make_selection(m_lim=23.0)
-        catalogue = _make_consistent_catalogue(universe, selection)
-        preset_redshift = np.full(200, 0.2)
-        original = preset_redshift.copy()
-        sample_host_galaxies(
-            universe=universe,
-            catalogue=catalogue,
-            selection=selection,
-            n=200,
-            rng=np.random.default_rng(0),
-            redshift=preset_redshift,
+        expected = sample_merger_redshifts(
+            universe.structure, universe.cosmology, rate, 50, np.random.default_rng(0)
         )
-        np.testing.assert_array_equal(preset_redshift, original)
+        np.testing.assert_array_equal(result.redshift, expected)
 
 
 # ---------------------------------------------------------------------------

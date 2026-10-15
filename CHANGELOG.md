@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Breaking:** `sample_host_galaxies` takes `rate` (a `MergerRate`) in place
+  of the `redshift` override, and no longer has `n_neighbours`. A catalogued
+  host is drawn from the whole catalogue with weight `L**p * R(z)/(1+z)`,
+  which gives the rate-weighted redshift distribution exactly, instead of
+  from the 200 catalogue galaxies nearest the trial redshift (which widened
+  to dz ~ 0.1 where the catalogue is sparse). Injection sets change for a
+  given seed.
+
 ## 0.2.0
 
 ### Added
