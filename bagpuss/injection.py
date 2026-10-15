@@ -332,32 +332,29 @@ class DistanceThreshold(Detectable):
 
 def _draw_catalogue_hosts(
     catalogue: GalaxyCatalogue,
-    trial_redshift: np.ndarray,
+    n: int,
     weight_power: float,
-    n_neighbours: int,
+    rate: MergerRate | None,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Draw a catalogue row per trial redshift, weighted by ``L**weight_power``.
+    r"""Draw ``n`` catalogue rows as hosts of mergers.
 
-    Each row is drawn from the ``n_neighbours`` catalogue galaxies nearest in
-    redshift to its trial redshift, via the cumulative weights of the
-    redshift-sorted catalogue.
+    Each galaxy is drawn with weight :math:`L^{p}` times the observer-frame
+    merger rate at its redshift, :math:`R(z)/(1+z)` (``1`` if ``rate`` is
+    *None*, i.e. events trace galaxies).  The catalogue's own redshift
+    density supplies the :math:`\mathrm{d}V_C/\mathrm{d}z` and selection
+    factors, so the hosts follow the redshift distribution of mergers whose
+    host is catalogued exactly.
     """
-    n_cat = len(catalogue)
-    k = max(1, min(n_neighbours, n_cat))
-    order = np.argsort(catalogue.redshifts, kind="stable")
-    z_sorted = catalogue.redshifts[order]
-    lum = catalogue.luminosities[order]
-    weights = (lum / np.median(lum)) ** weight_power
-    cum = np.concatenate([[0.0], np.cumsum(weights)])
-    del lum, weights
-
-    pos = np.searchsorted(z_sorted, trial_redshift)
-    lo = np.clip(pos - k // 2, 0, n_cat - k)
-    hi = lo + k
-    u = cum[lo] + rng.uniform(0.0, 1.0, size=len(lo)) * (cum[hi] - cum[lo])
-    sorted_idx = np.clip(np.searchsorted(cum, u, side="right") - 1, lo, hi - 1)
-    return order[sorted_idx]
+    weights = (catalogue.luminosities / np.median(catalogue.luminosities)) ** (
+        weight_power
+    )
+    if rate is not None:
+        z = catalogue.redshifts
+        weights = weights * rate.rate_density(z) / (1.0 + z)
+    cum = np.cumsum(weights)
+    u = rng.uniform(0.0, cum[-1], size=n)
+    return np.minimum(np.searchsorted(cum, u, side="right"), len(cum) - 1)
 
 
 def sample_host_galaxies(
@@ -366,22 +363,23 @@ def sample_host_galaxies(
     selection: MagnitudeLimitedSurvey,
     n: int,
     rng: np.random.Generator | None = None,
-    redshift: np.ndarray | None = None,
+    rate: MergerRate | None = None,
     host_luminosity_weight: float = 1.0,
-    n_neighbours: int = 200,
 ) -> HostAssignment:
-    """Draw host galaxy assignments for ``n`` potential GW events.
+    r"""Draw host galaxy assignments for ``n`` potential GW events.
 
-    For each event a trial host redshift and sky position are drawn from
-    the full galaxy population.  Events are taken to occur in galaxies with
-    probability proportional to :math:`L^{p}` (``p = host_luminosity_weight``),
-    so the probability that the host is bright enough to appear in
-    ``catalogue`` is the :math:`L^{p}`-weighted survey completeness at the
-    trial redshift.  A catalogued host is then drawn, with weight
-    :math:`L^{p}`, from the ``n_neighbours`` catalogue galaxies closest in
-    redshift to the trial redshift, and the event takes that galaxy's
-    redshift and sky position.  Uncatalogued events keep their trial
-    position.
+    For each event a trial redshift and sky position are drawn: from the
+    merger-rate distribution :math:`p(z)\propto R(z)/(1+z)\,dV_C/dz` if
+    ``rate`` is given, otherwise from the galaxy distribution of
+    ``universe.structure``.  Events are taken to occur in galaxies with
+    probability proportional to :math:`L^{p}` (``p =
+    host_luminosity_weight``), so the probability that the host is bright
+    enough to appear in ``catalogue`` is the :math:`L^{p}`-weighted survey
+    completeness at the trial redshift.  Each event whose host is
+    catalogued is given a catalogue galaxy drawn with weight :math:`L^{p}`
+    times the merger rate at the galaxy's redshift, and takes that
+    galaxy's redshift and sky position.  Uncatalogued events keep their
+    trial position.
 
     Parameters
     ----------
@@ -396,28 +394,20 @@ def sample_host_galaxies(
         Selection function used to compute the probability that a host at
         a given redshift is bright enough to be in ``catalogue``.
     n : int
-        Number of host assignments to draw.  Ignored if ``redshift`` is
-        given, in which case ``len(redshift)`` is used instead.
+        Number of host assignments to draw.
     rng : numpy.random.Generator or None, optional
         Random number generator.  If *None*, ``numpy.random.default_rng()``
         is used.
-    redshift : numpy.ndarray or None, optional
-        Precomputed trial host redshifts, shape ``(n,)``.  If *None*
-        (the default), redshifts are drawn from
-        ``universe.structure.sample_redshifts`` as usual.  Pass this to
-        substitute a different redshift distribution -- e.g. one weighted
-        by a :class:`~bagpuss.population.MergerRate` via
-        :func:`~bagpuss.population.sample_merger_redshifts`, as
-        :func:`build_injection_set` does -- while still drawing sky
-        positions and evaluating catalogue completeness the usual way.
+    rate : MergerRate or None, optional
+        Merger-rate density model.  If given, events follow the
+        rate-weighted redshift distribution (via
+        :func:`~bagpuss.population.sample_merger_redshifts`), as in
+        :func:`build_injection_set`; if *None* (the default), they follow
+        the galaxy distribution.
     host_luminosity_weight : float, optional
         Exponent ``p``: events occur in galaxies with probability
         :math:`\propto L^{p}`.  ``1`` (default) is luminosity weighting,
         ``0`` is number weighting (every galaxy equally likely to host).
-    n_neighbours : int, optional
-        Size of the redshift window (in catalogue galaxies, sorted by
-        redshift) a catalogued host is drawn from.  The window is
-        negligibly narrow wherever the catalogue is dense.
 
     Returns
     -------
@@ -427,11 +417,10 @@ def sample_host_galaxies(
 
     Notes
     -----
-    Because a catalogued host is drawn from galaxies at (nearly) the trial
-    redshift, catalogued events follow the same rate-weighted redshift
-    distribution as uncatalogued ones.  Memory: the catalogue's redshift
-    ordering and cumulative weights are built per call (about three extra
-    float/int arrays of ``len(catalogue)`` entries).
+    Catalogued and uncatalogued events together follow the trial redshift
+    distribution exactly, provided the catalogue was built from the same
+    universe and selection.  Memory: the cumulative host weights are built
+    per call (one float array of ``len(catalogue)`` entries).
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -439,11 +428,12 @@ def sample_host_galaxies(
     cosmology = universe.cosmology
     n_cat = len(catalogue)
 
-    if redshift is None:
+    if rate is None:
         redshift = universe.structure.sample_redshifts(n, cosmology, rng)
     else:
-        redshift = np.array(redshift, dtype=float, copy=True)
-        n = redshift.shape[0]
+        redshift = sample_merger_redshifts(
+            universe.structure, cosmology, rate, n, rng
+        )
     ra, dec = universe.structure.sample_positions(n, rng)
 
     completeness = selection.completeness(
@@ -462,11 +452,7 @@ def sample_host_galaxies(
     # observed keep their trial (uncatalogued) position.
     if n_observed > 0 and n_cat > 0:
         cat_idx = _draw_catalogue_hosts(
-            catalogue,
-            redshift[host_observed],
-            host_luminosity_weight,
-            n_neighbours,
-            rng,
+            catalogue, n_observed, host_luminosity_weight, rate, rng
         )
         redshift[host_observed] = catalogue.redshifts[cat_idx]
         ra[host_observed] = catalogue.ra[cat_idx]
@@ -720,9 +706,6 @@ def build_injection_set(
     )
     n = int(rng.poisson(n_expected))
 
-    redshift = sample_merger_redshifts(
-        universe.structure, universe.cosmology, rate, n, rng
-    )
     bbh = population.sample(n, rng)
     hosts = sample_host_galaxies(
         universe,
@@ -730,7 +713,7 @@ def build_injection_set(
         selection,
         n,
         rng,
-        redshift=redshift,
+        rate=rate,
         host_luminosity_weight=host_luminosity_weight,
     )
     return assemble_injection_set(

@@ -24,15 +24,16 @@ in galaxies with probability proportional to :math:`L^{p}` (``p`` is the
 every galaxy). The :math:`L^{p}`-weighted survey completeness at the trial
 redshift is then the probability that the host is bright enough to appear in the
 :class:`~bagpuss.catalogue.GalaxyCatalogue`. Events that pass this probabilistic
-cut are assigned a catalogue galaxy drawn, with weight :math:`L^{p}`, from the
-``n_neighbours`` catalogue galaxies closest in redshift to the trial redshift;
-they inherit its sky position and redshift (``host_galaxy_index`` records the
-row). The rest keep their trial position and are marked
-``host_galaxy_index == -1``. The luminosity distance is then computed from the
-redshift via the background cosmology.
+cut are assigned a catalogue galaxy drawn with weight :math:`L^{p}` times the
+observer-frame merger rate at the galaxy's redshift, :math:`R(z)/(1+z)` (``1``
+when no merger rate is given, so that events trace galaxies); they inherit its
+sky position and redshift (``host_galaxy_index`` records the row). The rest keep
+their trial position and are marked ``host_galaxy_index == -1``. The luminosity
+distance is then computed from the redshift via the background cosmology.
 
-Because a catalogued host is matched in redshift to the trial event, catalogued
-and uncatalogued events share the same (rate-weighted) redshift distribution.
+The catalogue's own redshift density supplies the comoving-volume and selection
+factors, so catalogued and uncatalogued events together follow the
+(rate-weighted) redshift distribution exactly, with no tuning parameter.
 This is unbiased if the catalogue was built from the same universe and
 selection. For stellar-mass- or star-formation-rate-weighted host assignment,
 subclass or wrap :func:`~bagpuss.injection.sample_host_galaxies`. The exported
