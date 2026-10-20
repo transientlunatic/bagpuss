@@ -603,6 +603,23 @@ def mdc_verify_release(release_dir: Path) -> None:
     show_default=True,
     help="Comma-separated hyperparameters to fit; the rest are held at the truth.",
 )
+@click.option(
+    "--simplepe-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help=(
+        "An asimov project's working directory: use the SimplePE posteriors "
+        "found there instead of the true parameters."
+    ),
+)
+@click.option(
+    "--drop-unsupported",
+    is_flag=True,
+    help=(
+        "Drop events whose posterior has no sample inside the true population "
+        "(a parameter-estimation failure); they are listed in summary.json."
+    ),
+)
 @click.option("--nlive", type=int, default=500, show_default=True)
 @click.option(
     "--mass-grid",
@@ -623,6 +640,8 @@ def mdc_fit_population(  # noqa: PLR0913
     release_dir: Path,
     out_dir: Path,
     free: str,
+    simplepe_dir: Path | None,
+    drop_unsupported: bool,
     nlive: int,
     mass_grid: str,
     sampler: str,
@@ -637,17 +656,36 @@ def mdc_fit_population(  # noqa: PLR0913
     Needs the ``population`` extra.
     """
     import json
-    from dataclasses import asdict
+    from dataclasses import asdict, replace
 
     from bagpuss.population_inference import (
         fit_population,
         load_release,
         summarise,
+        unsupported_events,
     )
 
-    inputs = load_release(release_dir)
+    inputs = load_release(release_dir, simplepe_dir=simplepe_dir)
+    if inputs.missing_events:
+        click.echo(
+            f"{len(inputs.missing_events)} detectable events have no posterior "
+            "and are excluded",
+            err=True,
+        )
     names = [n.strip() for n in free.split(",") if n.strip()]
     grid = mass_grid.split(",")
+    dropped: list[str] = []
+    if drop_unsupported:
+        dropped = unsupported_events(inputs, (int(grid[0]), int(grid[1])))
+        keep = [i for i, n in enumerate(inputs.event_names) if n not in dropped]
+        inputs = replace(
+            inputs,
+            posteriors=[inputs.posteriors[i] for i in keep],
+            event_names=[inputs.event_names[i] for i in keep],
+        )
+        click.echo(
+            f"dropped {len(dropped)} events with no support: {dropped}", err=True
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     samples, _ = fit_population(
         inputs.posteriors,
@@ -669,6 +707,9 @@ def mdc_fit_population(  # noqa: PLR0913
         json.dumps(
             {
                 "n_events": len(inputs.posteriors),
+                "missing_events": inputs.missing_events,
+                "dropped_unsupported": dropped,
+                "posteriors": "simplepe" if simplepe_dir else "true parameters",
                 "credible_level": credible_level,
                 "parameters": [asdict(r) for r in rows],
             },

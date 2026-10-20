@@ -23,12 +23,13 @@ bias here. ``gwpopulation`` and ``bilby`` are imported lazily; install the
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import h5py
 import numpy as np
+from astropy.cosmology import FLRW
 
 from bagpuss.population import PowerLawPlusPeakMassDistribution
 from bagpuss.sensitivity import InjectionDistribution, SensitivityInjectionSet
@@ -45,8 +46,11 @@ __all__: list[str] = [
     "event_samples",
     "fit_population",
     "load_release",
+    "load_simplepe_posteriors",
+    "simplepe_samples",
     "selection_data",
     "summarise",
+    "unsupported_events",
     "true_hyperparameters",
 ]
 
@@ -310,6 +314,35 @@ def summarise(
     return rows
 
 
+def unsupported_events(
+    inputs: ReleaseInputs, mass_grid: tuple[int, int] = (1000, 500)
+) -> list[str]:
+    """Return the events with no posterior sample inside the true population.
+
+    The hierarchical likelihood of such an event is exactly zero at the true
+    hyperparameters (and, for a hard ``m_min``, over most of the prior), so
+    one of them makes every fit return a likelihood of zero. It means the
+    event's parameter estimation excluded the truth, which is a failure of the
+    parameter estimation and not a feature of the population.
+
+    Parameters
+    ----------
+    inputs : ReleaseInputs
+        As from :func:`load_release`.
+    mass_grid : tuple of int, optional
+        See :func:`build_likelihood`.
+    """
+    # gwpopulation caches by parameters, not data, so a model reused over
+    # events with different samples returns stale values: build one per event.
+    out = []
+    for name, post in zip(inputs.event_names, inputs.posteriors, strict=True):
+        model = _models(inputs.z_max, inputs.cosmology, mass_grid)
+        data = {k: post[k].to_numpy() for k in ("mass_1", "mass_ratio", "redshift")}
+        if not np.any(np.asarray(model.prob(data, **inputs.truth)) > 0.0):
+            out.append(name)
+    return out
+
+
 def fit_population(
     posteriors: Sequence[pd.DataFrame],
     selection: Mapping[str, Any],
@@ -412,10 +445,140 @@ class ReleaseInputs:
     truth: dict[str, float]
     z_max: float
     cosmology: str
+    event_names: list[str] = field(default_factory=list)
+    missing_events: list[str] = field(default_factory=list)
+
+
+def simplepe_samples(
+    path: str | Path,
+    cosmology: FLRW,
+    n_samples: int | None = 600,
+    seed: int = 0,
+) -> pd.DataFrame:
+    r"""Read one event's ``SimplePE`` posterior as ``gwpopulation`` samples.
+
+    The file is ``posterior_samples.dat``: detector-frame ``chirp_mass``,
+    ``symmetric_mass_ratio`` and ``distance`` with an importance ``weight``.
+    ``SimplePE`` with its defaults (reweighting to uniform detector-frame
+    component masses and isotropic spins, and ``--distance_prior
+    UniformVolume``) has the prior
+
+    .. math:: \pi(m_1^d, m_2^d, d_L) \propto d_L^2 .
+
+    In :math:`(m_1, q, z)` of the source frame this is :math:`\pi \propto
+    d_L^2\,(1+z)^2\,m_1\,\mathrm{d}d_L/\mathrm{d}z`, the Jacobian of
+    :math:`m^d = (1+z)m` and :math:`d_L(z)` in the (fixed) cosmology. The
+    weights are folded into the ``prior`` column, so the hierarchical
+    likelihood's mean of :math:`p/\pi` over the samples is the
+    weight-normalised sum, as for a weighted posterior.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        A ``posterior_samples.dat`` written by ``simple_pe_analysis``.
+    cosmology : astropy.cosmology.FLRW
+        The cosmology which relates distance and redshift.
+    n_samples : int or None, optional
+        Resample the weighted posterior to this many equally weighted samples
+        (with replacement, so ``prior`` is then just :math:`\pi`). Events
+        need equal numbers of samples for ``gwpopulation``, and the cost of a
+        likelihood evaluation is proportional to the total. ``None`` keeps
+        the weighted samples.
+    seed : int, optional
+        Seed of the resampling.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``mass_1``, ``mass_ratio``, ``redshift`` and ``prior``.
+    """
+    import pandas as pd
+
+    data = np.genfromtxt(path, names=True)
+    chirp = np.asarray(data["chirp_mass"], dtype=float)
+    eta = np.asarray(data["symmetric_mass_ratio"], dtype=float)
+    d_l = np.asarray(data["distance"], dtype=float)
+    weight = np.asarray(data["weight"], dtype=float)
+    weight = weight / weight.mean()
+
+    z_grid = np.linspace(0.0, 6.0, 6001)
+    d_grid = np.asarray(cosmology.luminosity_distance(z_grid).to("Mpc").value)
+    z = np.interp(d_l, d_grid, z_grid)
+    d_dz = np.interp(z, z_grid, np.gradient(d_grid, z_grid))
+
+    total = chirp * eta ** (-0.6)
+    root = np.sqrt(np.clip(1.0 - 4.0 * eta, 0.0, None))
+    m1_det = 0.5 * total * (1.0 + root)
+    m2_det = 0.5 * total * (1.0 - root)
+    m1 = m1_det / (1.0 + z)
+    prior = d_l**2 * (1.0 + z) ** 2 * m1 * d_dz / 1.0e9
+    frame = pd.DataFrame(
+        {
+            "mass_1": m1,
+            "mass_ratio": m2_det / m1_det,
+            "redshift": z,
+            "prior": prior,
+        }
+    )
+    if n_samples is None:
+        frame["prior"] = frame["prior"] / weight
+        return frame
+    rng = np.random.default_rng(seed)
+    keep = rng.choice(len(frame), size=n_samples, p=weight / weight.sum())
+    return frame.iloc[keep].reset_index(drop=True)
+
+
+def load_simplepe_posteriors(
+    release_dir: str | Path,
+    working_dir: str | Path,
+    cosmology: FLRW,
+    n_samples: int | None = 600,
+) -> tuple[list[pd.DataFrame], list[str], list[str]]:
+    """Read the ``SimplePE`` posteriors of a release's detectable events.
+
+    Parameters
+    ----------
+    release_dir : str or pathlib.Path
+        The release; its ``injections.h5`` names the detectable events.
+    working_dir : str or pathlib.Path
+        The asimov project's ``working`` directory, holding
+        ``<event>/simplepe-xhm/output/posterior_samples.dat``.
+    cosmology : astropy.cosmology.FLRW
+        See :func:`simplepe_samples`.
+    n_samples : int or None, optional
+        Samples per event (see :func:`simplepe_samples`).
+
+    Returns
+    -------
+    list of pandas.DataFrame, list of str, list of str
+        The posteriors of the events which have one, their names, and the names
+        of the events which do not (no skymap, or the analysis failed).
+    """
+    with h5py.File(Path(release_dir) / "injections.h5", "r") as fh:
+        grp = cast(h5py.Group, fh["injections"])
+        detectable = np.asarray(grp["detectable"], dtype=bool)
+        names = [
+            n.decode() if isinstance(n, bytes) else str(n)
+            for n in np.asarray(grp["event_name"])[detectable]
+        ]
+    found: list[pd.DataFrame] = []
+    found_names: list[str] = []
+    missing: list[str] = []
+    for index, name in enumerate(names):
+        path = Path(working_dir) / name / "simplepe-xhm" / "output"
+        path = path / "posterior_samples.dat"
+        if path.exists():
+            found.append(simplepe_samples(path, cosmology, n_samples, seed=index))
+            found_names.append(name)
+        else:
+            missing.append(name)
+    return found, found_names, missing
 
 
 def load_release(
-    release_dir: str | Path, config: MDCConfig | None = None
+    release_dir: str | Path,
+    config: MDCConfig | None = None,
+    simplepe_dir: str | Path | None = None,
 ) -> ReleaseInputs:
     """Read a data release into the inputs of :func:`fit_population`.
 
@@ -433,6 +596,10 @@ def load_release(
         A directory written by ``bagpuss mdc export-release``.
     config : MDCConfig or None, optional
         The run configuration, if not the release's own ``config.yaml``.
+    simplepe_dir : str or pathlib.Path or None, optional
+        An asimov project's ``working`` directory. If given, the events are the
+        ``SimplePE`` posteriors found there (see
+        :func:`load_simplepe_posteriors`) rather than the true parameters.
 
     Raises
     ------
@@ -476,6 +643,7 @@ def load_release(
     with h5py.File(root / "injections.h5", "r") as fh:
         grp = cast(h5py.Group, fh["injections"])
         detectable = np.asarray(grp["detectable"], dtype=bool)
+        detectable_mask = detectable
         events = {
             name: np.asarray(grp[name])[detectable]
             for name in ("m1_source", "m2_source", "redshift")
@@ -483,8 +651,23 @@ def load_release(
 
     mass = build_population(config).mass
     assert isinstance(mass, PowerLawPlusPeakMassDistribution)
+    missing: list[str] = []
+    if simplepe_dir is None:
+        posteriors = event_samples(**events)
+        with h5py.File(root / "injections.h5", "r") as fh:
+            grp = cast(h5py.Group, fh["injections"])
+            names = [
+                n.decode() if isinstance(n, bytes) else str(n)
+                for n in np.asarray(grp["event_name"])[detectable_mask]
+            ]
+    else:
+        posteriors, names, missing = load_simplepe_posteriors(
+            root, simplepe_dir, _load_cosmology(config.cosmology)
+        )
     return ReleaseInputs(
-        posteriors=event_samples(**events),
+        posteriors=posteriors,
+        event_names=names,
+        missing_events=missing,
         selection=selection,
         truth=true_hyperparameters(mass),
         z_max=float(config.z_max),

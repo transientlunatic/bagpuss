@@ -33,3 +33,23 @@ The command exits non-zero if any true value lies outside the central credible
 interval (``--credible-level``, default 0.99; with several hyperparameters a
 90% interval would be missed by chance most of the time), and writes
 ``summary.json`` with each parameter's quantile and :math:`z`-score.
+
+SimplePE posteriors
+-------------------
+
+``--simplepe-dir`` (the asimov project's ``working`` directory) replaces the
+true parameters with the ``SimplePE`` posteriors of the detectable events.
+:func:`~bagpuss.population_inference.simplepe_samples` converts the
+detector-frame chirp mass, symmetric mass ratio and distance to
+:math:`(m_1, q, z)` with the release's cosmology and divides out the prior
+``SimplePE`` assumed with its defaults (uniform detector-frame component masses
+and a uniform-volume distance prior, :math:`\pi \propto d_L^2`), which in the
+source-frame variables is :math:`d_L^2\,(1+z)^2\,m_1\,\mathrm{d}d_L/\mathrm{d}z`.
+The importance weights are used to resample each event to the same number of
+samples. The unit tests check the conversion by sampling the prior and
+confirming that weighting by its inverse is flat.
+
+Events with no posterior (no skymap, or the analysis failed) are excluded; they
+are listed in ``summary.json``. ``--drop-unsupported`` also drops events whose
+posterior has no sample inside the true population, which make the likelihood
+exactly zero; these are parameter-estimation failures, and are listed too.

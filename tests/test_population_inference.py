@@ -14,8 +14,10 @@ from bagpuss.population_inference import (
     event_samples,
     load_release,
     selection_data,
+    simplepe_samples,
     summarise,
     true_hyperparameters,
+    unsupported_events,
 )
 from bagpuss.sensitivity import InjectionDistribution, draw_injections
 
@@ -74,6 +76,67 @@ class TestSummarise(unittest.TestCase):
         self.assertEqual(truth["beta"], 1.4)
         self.assertEqual(truth["lam"], 0.03)
         self.assertEqual(truth["lamb"], 0.0)
+
+
+@unittest.skipUnless(_HAVE_GWPOPULATION, "pandas is not installed")
+class TestSimplePESamples(unittest.TestCase):
+    """The SimplePE prior in (m1, q, z) is the Jacobian of the detector-frame one."""
+
+    def _write(
+        self,
+        path: Path,
+        m1d: np.ndarray,
+        m2d: np.ndarray,
+        dl: np.ndarray,
+        w: np.ndarray,
+    ) -> None:
+        total = m1d + m2d
+        eta = m1d * m2d / total**2
+        chirp = total * eta**0.6
+        header = "chirp_mass symmetric_mass_ratio distance weight"
+        np.savetxt(path, np.c_[chirp, eta, dl, w], header=header, comments="")
+
+    def test_prior_is_flat_in_source_frame_variables(self) -> None:
+        """Samples from the PE prior, weighted by 1/prior, are uniform in a box."""
+        rng = np.random.default_rng(0)
+        n = 400_000
+        m = np.sort(rng.uniform(20.0, 100.0, size=(n, 2)), axis=1)[:, ::-1]
+        # p(d_L) proportional to d_L**2 on [100, 3000]
+        dl = (rng.uniform(size=n) * (3000.0**3 - 100.0**3) + 100.0**3) ** (1 / 3)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "posterior_samples.dat"
+            self._write(path, m[:, 0], m[:, 1], dl, np.ones(n))
+            df = simplepe_samples(path, Planck18, n_samples=None)
+        box = (
+            (df.mass_1 > 30.0)
+            & (df.mass_1 < 50.0)
+            & (df.mass_ratio > 0.8)
+            & (df.redshift > 0.05)
+            & (df.redshift < 0.3)
+        )
+        w = 1.0 / df.prior[box].to_numpy()
+        for name, centre in (
+            ("mass_1", 40.0),
+            ("mass_ratio", 0.9),
+            ("redshift", 0.175),
+        ):
+            mean = float(np.average(df[name][box].to_numpy(), weights=w))
+            self.assertAlmostEqual(mean / centre, 1.0, delta=0.02, msg=name)
+
+    def test_weights_enter_the_prior(self) -> None:
+        """A sample with twice the weight has half the prior."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "posterior_samples.dat"
+            self._write(
+                path,
+                np.array([40.0, 40.0]),
+                np.array([30.0, 30.0]),
+                np.array([500.0, 500.0]),
+                np.array([1.0, 2.0]),
+            )
+            df = simplepe_samples(path, Planck18, n_samples=None)
+        self.assertAlmostEqual(float(df.prior[0] / df.prior[1]), 2.0)
+        self.assertAlmostEqual(float(df.mass_ratio[0]), 0.75)
 
 
 class TestSelectionData(unittest.TestCase):
@@ -166,6 +229,38 @@ class TestAgreementWithGWPopulation(unittest.TestCase):
         mu, _ = vt.detection_efficiency(true_hyperparameters(mass))
         self.assertGreater(estimate.value, 0.0)
         self.assertAlmostEqual(mu / estimate.value, 1.0, delta=0.03)
+
+
+@unittest.skipUnless(_HAVE_GWPOPULATION, "gwpopulation and bilby are not installed")
+class TestUnsupportedEvents(unittest.TestCase):
+    """unsupported_events finds posteriors which exclude the true population."""
+
+    def test_flags_only_the_event_outside_the_support(self) -> None:
+        """An event with every sample below m_min is flagged, and no other."""
+        import pandas as pd
+
+        from bagpuss.population_inference import ReleaseInputs
+
+        def frame(m1: float, q: float) -> pd.DataFrame:
+            n = 50
+            return pd.DataFrame(
+                {
+                    "mass_1": np.full(n, m1),
+                    "mass_ratio": np.full(n, q),
+                    "redshift": np.full(n, 0.1),
+                    "prior": np.ones(n),
+                }
+            )
+
+        inputs = ReleaseInputs(
+            posteriors=[frame(30.0, 0.8), frame(9.0, 0.4), frame(40.0, 0.9)],
+            selection={},
+            truth=true_hyperparameters(_mass()),
+            z_max=_Z_MAX,
+            cosmology="Planck18",
+            event_names=["a", "b", "c"],
+        )
+        self.assertEqual(unsupported_events(inputs, (200, 100)), ["b"])
 
 
 class TestLoadRelease(unittest.TestCase):
