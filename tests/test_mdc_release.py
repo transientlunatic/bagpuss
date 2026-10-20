@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -22,17 +23,21 @@ from bagpuss.mdc.pipeline import (
     MDCValidationError,
     assemble_detections,
     assemble_injections,
+    assemble_sensitivity,
+    build_sensitivity_distribution,
     consolidate_catalogue,
     detect_injection_shard,
     generate_catalogue_tile,
     generate_injection_shard,
+    generate_sensitivity_shard,
     load_consolidated_catalogue,
 )
 from bagpuss.mdc.release import _sha256, build_release, verify_release
+from bagpuss.sensitivity import SensitivityInjectionSet
 from tests.test_mdc_pipeline import _FakeBackend, _FakeLocalizer, _tiny_config
 
 
-def _run_pipeline(tmp: str) -> MDCConfig:
+def _run_pipeline(tmp: str, **overrides: Any) -> MDCConfig:  # noqa: ANN401
     """Generate a tiny store with detections and skymaps (fake waveform engine)."""
     cfg = _tiny_config(
         n_ra_tiles=2,
@@ -42,6 +47,7 @@ def _run_pipeline(tmp: str) -> MDCConfig:
         snr_threshold=8.0,
         write_frames=False,
         write_skymaps=True,
+        **overrides,
     )
     for tile in range(cfg.n_tiles):
         generate_catalogue_tile(cfg, tile)
@@ -54,6 +60,10 @@ def _run_pipeline(tmp: str) -> MDCConfig:
             cfg, shard, backend=_FakeBackend(), localizer=_FakeLocalizer()
         )
     assemble_detections(cfg)
+    if cfg.sensitivity_enabled:
+        for shard in range(cfg.sensitivity_n_shards):
+            generate_sensitivity_shard(cfg, shard, backend=_FakeBackend())
+        assemble_sensitivity(cfg)
     return cfg
 
 
@@ -321,6 +331,143 @@ class TestReleaseIntegrity(unittest.TestCase):
         shutil.rmtree(Path(self.cfg.output_dir) / "skymaps")
         with self.assertRaises(MDCValidationError):
             build_release(self.cfg, self.out, overwrite=True)
+
+
+_SENSITIVITY: dict[str, Any] = {
+    "sensitivity_n_shards": 2,
+    "sensitivity_n_per_shard": 500,
+    "sensitivity_z_max": 0.3,
+    "sensitivity_min_snr": 4.0,
+}
+
+
+class TestSensitivityRelease(unittest.TestCase):
+    """The release of a run with a sensitivity-injection campaign."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        """Run one tiny pipeline with a campaign and build its release."""
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.cfg = _run_pipeline(cls._tmp.name, **_SENSITIVITY)
+        cls.out = Path(cls._tmp.name) / "release"
+        cls.manifest = build_release(cls.cfg, cls.out)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        """Remove the scratch directory."""
+        cls._tmp.cleanup()
+
+    def test_release_contains_and_verifies_sensitivity(self) -> None:
+        """sensitivity.h5 is a checksummed part of a release that verifies."""
+        self.assertIn("sensitivity.h5", self.manifest["files"])
+        self.assertTrue(verify_release(self.out)["ok"], verify_release(self.out))
+
+    def test_counts_in_manifest(self) -> None:
+        """The manifest carries the draws, the stored rows and the detections."""
+        counts = self.manifest["counts"]
+        self.assertEqual(counts["n_sensitivity_total"], 2 * 500)
+        self.assertLessEqual(
+            counts["n_sensitivity_detected"], counts["n_sensitivity_stored"]
+        )
+        self.assertLess(counts["n_sensitivity_stored"], counts["n_sensitivity_total"])
+        self.assertGreater(counts["n_sensitivity_detected"], 0)
+
+    def test_total_draws_kept_though_hopeless_rows_dropped(self) -> None:
+        """n_total counts every draw; only rows above min_snr are stored."""
+        inj, snr = SensitivityInjectionSet.from_hdf5(
+            self.out / "sensitivity.h5", with_snr=True
+        )
+        self.assertEqual(inj.n_total, 1000)
+        self.assertEqual(len(inj), len(snr))
+        self.assertTrue(np.all(snr >= self.cfg.sensitivity_min_snr))
+
+    def test_release_estimate_matches_the_full_store(self) -> None:
+        """Dropping hopeless rows must not change P_det (n_total is preserved)."""
+        from bagpuss.mdc.pipeline import _open_store
+
+        root = _open_store(self.cfg, mode="r")
+        shards = [
+            root["sensitivity"][f"shard_{i:04d}"]
+            for i in range(self.cfg.sensitivity_n_shards)
+        ]
+        full = SensitivityInjectionSet.concatenate(
+            [SensitivityInjectionSet.from_zarr(g) for g in shards]
+        )
+        full_snr = np.concatenate([np.asarray(g["network_snr"]) for g in shards])
+        target = build_sensitivity_distribution(self.cfg, None, None)
+        from_store = full.detection_probability(target.log_prob, full_snr, 8.0)
+
+        inj, snr = SensitivityInjectionSet.from_hdf5(
+            self.out / "sensitivity.h5", with_snr=True
+        )
+        from_release = inj.detection_probability(target.log_prob, snr, 8.0)
+        self.assertAlmostEqual(from_release.value, from_store.value, places=12)
+        self.assertEqual(from_release.n_total, from_store.n_total)
+
+    def test_attributes_describe_the_draw_distribution(self) -> None:
+        """A user can reconstruct the support from the file alone."""
+        with h5py.File(self.out / "sensitivity.h5", "r") as fh:
+            attrs = dict(fh["injections"].attrs)
+            detectors = list(fh["injections/active"].attrs["detectors"])
+        self.assertEqual(attrs["z_max"], 0.3)
+        self.assertEqual(attrs["snr_threshold"], 8.0)
+        self.assertEqual(attrs["min_snr"], 4.0)
+        self.assertIn("dredshift", attrs["density_measure"])
+        self.assertEqual(detectors, list(self.cfg.detectors))
+
+    def test_readme_and_metadata_mention_it(self) -> None:
+        """The documentation tells users to use n_total as the denominator."""
+        readme = (self.out / "README.md").read_text()
+        self.assertIn("sensitivity.h5", readme)
+        self.assertIn("`n_total`", readme)
+        self.assertIn(
+            "sensitivity",
+            json.loads((self.out / "zenodo_metadata.json").read_text())["description"],
+        )
+
+    def test_tampered_total_is_detected(self) -> None:
+        """A changed n_total (which would bias P_det) fails verification."""
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "release"
+            shutil.copytree(self.out, copy)
+            with h5py.File(copy / "sensitivity.h5", "a") as fh:
+                fh["injections"].attrs["n_total"] = 999
+            report = verify_release(copy)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("n_total" in i for i in report["issues"]), report["issues"])
+
+    def test_absent_without_a_campaign(self) -> None:
+        """A run without a campaign produces no sensitivity.h5 and no counts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _run_pipeline(tmp)
+            manifest = build_release(cfg, Path(tmp) / "release")
+        self.assertNotIn("sensitivity.h5", manifest["files"])
+        self.assertNotIn("n_sensitivity_total", manifest["counts"])
+
+
+class TestAsciiCatalogue(unittest.TestCase):
+    """The flat-text catalogue is not named after the real GLADE+ catalogue."""
+
+    def test_files_named_and_documented(self) -> None:
+        """Release names say what the files are, and the README says not GLADE+."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _run_pipeline(tmp)
+            out = Path(tmp) / "release"
+            manifest = build_release(cfg, out, glade=True)
+            names = sorted(p.name for p in out.iterdir())
+            readme = (out / "README.md").read_text()
+            notes = (out / "catalogue_ascii_README.txt").read_text()
+            ok = verify_release(out)["ok"]
+        self.assertFalse([n for n in names if n.lower().startswith("glade")])
+        for name in (
+            "catalogue_ascii.dat.gz",
+            "catalogue_ascii_completeness.dat",
+            "catalogue_ascii_README.txt",
+        ):
+            self.assertIn(name, manifest["files"])
+        self.assertIn("not GLADE+", readme)
+        self.assertIn("catalogue_ascii.dat", notes)
+        self.assertTrue(ok)
 
 
 class TestVerifyReleaseCli(unittest.TestCase):

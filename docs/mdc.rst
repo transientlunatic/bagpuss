@@ -52,6 +52,10 @@ Pipeline shape
                    -> assemble_detections
                        -> package_manifest
 
+   sensitivity_shard(shard_id) x sensitivity.n_shards   (optional; independent
+       -> assemble_sensitivity                           of everything above)
+           -> package_manifest
+
 1. **generate-tile** (:func:`~bagpuss.mdc.pipeline.generate_catalogue_tile`)
    — draws a Poisson realisation of the observable galaxy population
    restricted to one equal-area sky tile (see *Sky tiling* below), writing
@@ -201,7 +205,8 @@ Configuration
 See :class:`bagpuss.mdc.config.MDCConfig` for the full field reference. On
 disk a config file is a **nested** YAML mapping whose top-level sections
 mirror the pipeline's own stages -- ``galaxies``, ``population``,
-``observation``, ``detection``, ``estimation``, ``sharding``, ``run`` --
+``observation``, ``detection``, ``estimation``, ``sharding``,
+``sensitivity``, ``run`` --
 rather than one flat list of ~30 keys.
 :func:`~bagpuss.mdc.config.load_config` flattens this against
 :data:`bagpuss.mdc.config._SCHEMA` into :class:`MDCConfig`'s fields. A
@@ -243,6 +248,11 @@ run-specific file only needs to override what differs from the defaults
      n_dec_tiles: 8
      n_injection_shards: 200
 
+   sensitivity:  # optional: injections for the selection function P(D|Lambda)
+     n_shards: 200
+     n_per_shard: 10000
+     z_max: 3.0
+
    run:
      master_seed: 20260720
      store: /shared/home/<user>/mdc/z3/store.zarr
@@ -269,6 +279,28 @@ that downstream frame-generation tooling can decide which detectors are
 actually active for each event (with realistic time-correlation, not an
 independent per-event coin flip) rather than assuming every detector in
 ``network`` observes every event.
+
+Sensitivity injections
+----------------------
+
+The ``sensitivity`` section adds a campaign of injections to estimate the
+selection function :math:`P(D|\Lambda)` -- see :doc:`sensitivity` for why it
+differs from the event set. ``n_shards`` shards of ``n_per_shard`` draws are
+generated (``bagpuss mdc generate-sensitivity --shard-id N``), each covering an
+equal slice of the observation window and computing the network SNR of every
+draw with the same duty-cycle schedule and backend as the event set, then
+validated by ``bagpuss mdc assemble-sensitivity``. ``z_max``, ``m_min``,
+``m_max``, ``alpha``, ``beta_q`` and ``kappa`` set the support of the
+(deliberately broad) draw distribution; it must contain that of every
+population the selection function will be evaluated for. ``n_per_shard = 0``
+(the default) disables the campaign.
+
+``bagpuss mdc make-dag --sensitivity-only`` renders a DAG for adding a
+campaign to a store which has already been generated.
+:func:`bagpuss.mdc.pipeline.build_population_log_prob` gives the log density of
+the run's *true* population, to check the campaign against the event set: the
+estimated :math:`P(D|\Lambda_{\rm true})` should match the event set's detected
+fraction.
 
 Assembling the data release
 ---------------------------
@@ -299,6 +331,11 @@ without modifying the store:
    provenance, documentation and integrity (the config has the machine-specific
    store paths removed).
 
+When the store has a sensitivity campaign the release also holds
+``sensitivity.h5``, with every injection at or above ``sensitivity.min_snr``,
+its draw density and SNR, and the total number drawn as the ``n_total``
+attribute (the denominator of the estimate).
+
 ``zenodo_metadata.json`` holds the deposit's metadata (title, creators,
 licence, keywords) for the Zenodo form or API; it is not itself part of the
 upload. ``verify-release`` re-checks the checksums, row counts, that every
@@ -318,6 +355,8 @@ One subcommand per stage, all under ``bagpuss mdc``:
    $ bagpuss mdc assemble-injections --config config.yaml
    $ bagpuss mdc detect-injections --config config.yaml --shard-id 0
    $ bagpuss mdc assemble-detections --config config.yaml
+   $ bagpuss mdc generate-sensitivity --config config.yaml --shard-id 0
+   $ bagpuss mdc assemble-sensitivity --config config.yaml
    $ bagpuss mdc package --config config.yaml
    $ bagpuss mdc export-glade --config config.yaml --out-dir glade_export/
 

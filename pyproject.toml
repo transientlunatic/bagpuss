@@ -39,6 +39,13 @@ detection = [
     "ligo.skymap>=2.0",
     "igwn-ligolw>=2.1",
 ]
+# Population inference on a catalogue (`bagpuss mdc fit-population`).
+population = [
+    "gwpopulation>=1.3",
+    "bilby>=2.0",
+    "dynesty>=2.0",
+    "pandas>=2.0",
+]
 dev = [
     "ruff>=0.4",
     "mypy>=1.10",

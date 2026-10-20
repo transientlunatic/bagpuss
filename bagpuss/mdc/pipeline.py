@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -58,6 +59,11 @@ from bagpuss.population import (
     PowerLawPlusPeakMassDistribution,
     expected_n_mergers,
 )
+from bagpuss.sensitivity import (
+    InjectionDistribution,
+    SensitivityInjectionSet,
+    draw_injections,
+)
 from bagpuss.universe import PointProcess, SkyPatch, Universe
 
 __all__: list[str] = [
@@ -79,6 +85,11 @@ __all__: list[str] = [
     "assemble_injections",
     "detect_injection_shard",
     "assemble_detections",
+    "build_sensitivity_distribution",
+    "build_population_log_prob",
+    "sensitivity_time_bounds",
+    "generate_sensitivity_shard",
+    "assemble_sensitivity",
     "package_manifest",
     "export_glade_catalogue",
 ]
@@ -86,7 +97,13 @@ __all__: list[str] = [
 #: SeedSequence tag distinguishing the catalogue-tile RNG stream from the
 #: injection-shard stream, so the two never collide even if a run happened
 #: to use the same shard id for both.
-_SEED_TAGS: dict[str, int] = {"tile": 1, "injection": 2, "duty": 3, "skymap": 4}
+_SEED_TAGS: dict[str, int] = {
+    "tile": 1,
+    "injection": 2,
+    "duty": 3,
+    "skymap": 4,
+    "sensitivity": 5,
+}
 
 
 class MDCValidationError(Exception):
@@ -1110,6 +1127,270 @@ def assemble_detections(
 
 
 # ---------------------------------------------------------------------------
+# Sensitivity injections: P(D | Lambda)
+# ---------------------------------------------------------------------------
+
+
+def _observation_window(config: MDCConfig) -> tuple[float, float]:
+    """Return the run's full ``(t_start, t_end)``, resolving the O3 defaults."""
+    t_start = config.t_start if config.t_start is not None else GPS_O3_START
+    t_end = config.t_end if config.t_end is not None else GPS_O3_END
+    return float(t_start), float(t_end)
+
+
+def build_sensitivity_distribution(
+    config: MDCConfig, t_start: float | None = None, t_end: float | None = None
+) -> InjectionDistribution:
+    """Build the sensitivity-injection distribution for *config*.
+
+    Parameters
+    ----------
+    config : MDCConfig
+        Run configuration, providing the ``sensitivity_*`` fields.
+    t_start, t_end : float or None, optional
+        Time window; defaults to the run's full observation window.
+    """
+    window = _observation_window(config)
+    return InjectionDistribution(
+        cosmology=_load_cosmology(config.cosmology),
+        t_start=window[0] if t_start is None else t_start,
+        t_end=window[1] if t_end is None else t_end,
+        z_max=config.sensitivity_z_max,
+        m_min=config.sensitivity_m_min,
+        m_max=config.sensitivity_m_max,
+        alpha=config.sensitivity_alpha,
+        beta_q=config.sensitivity_beta_q,
+        kappa=config.sensitivity_kappa,
+    )
+
+
+def build_population_log_prob(
+    config: MDCConfig,
+) -> Callable[[dict[str, np.ndarray]], np.ndarray]:
+    """Return the log density of the run's *true* population, for reweighting.
+
+    The target a sensitivity estimate is evaluated for to check the run against
+    its own event set: the configured mass model, isotropic spins with
+    magnitudes up to ``spin_a_max``, and a constant merger-rate density out to
+    ``z_max``, with isotropic sky position and inclination and uniform
+    polarisation and merger time. Expressed in the measure of
+    :data:`bagpuss.sensitivity.DENSITY_MEASURE`, so it can be passed to
+    :meth:`~bagpuss.sensitivity.SensitivityInjectionSet.detection_probability`.
+    """
+    population = build_population(config)
+    mass = cast(PowerLawPlusPeakMassDistribution, population.mass)
+    window = _observation_window(config)
+    base = InjectionDistribution(
+        cosmology=_load_cosmology(config.cosmology),
+        t_start=window[0],
+        t_end=window[1],
+        z_max=config.z_max,
+        m_min=config.mass_m_min,
+        m_max=config.mass_m_max,
+        a_max=config.spin_a_max,
+        kappa=0.0,
+    )
+
+    def log_prob(params: dict[str, np.ndarray]) -> np.ndarray:
+        return base.log_prob(params, mass_log_prob=mass.log_prob)
+
+    return log_prob
+
+
+def sensitivity_time_bounds(config: MDCConfig, shard_id: int) -> tuple[float, float]:
+    """Return the ``(t_start, t_end)`` GPS bounds of sensitivity shard *shard_id*.
+
+    The observation window is split into ``sensitivity_n_shards`` equal slices.
+    """
+    if not 0 <= shard_id < config.sensitivity_n_shards:
+        raise ValueError(
+            f"shard_id must be in [0, {config.sensitivity_n_shards}), got {shard_id!r}"
+        )
+    t_start, t_end = _observation_window(config)
+    edges = np.linspace(t_start, t_end, config.sensitivity_n_shards + 1)
+    return float(edges[shard_id]), float(edges[shard_id + 1])
+
+
+def generate_sensitivity_shard(
+    config: MDCConfig,
+    shard_id: int,
+    backend: DetectionBackend | None = None,
+) -> dict[str, Any]:
+    """Draw one shard of sensitivity injections and compute their SNRs.
+
+    A DAG node independent of the catalogue and of the event set. The shard
+    draws ``config.sensitivity_n_per_shard`` injections from the broad
+    :class:`~bagpuss.sensitivity.InjectionDistribution` over its slice of the
+    observation window, and computes each one's network SNR **exactly as**
+    :func:`detect_injection_shard` does for the event set: the same duty-cycle
+    schedule (same seed, so the same detectors are observing at the same
+    times), the same backend, no early cut. The SNR of every injection is
+    stored, so the threshold can be changed later.
+
+    Each injection's draw density is evaluated for the *whole* window, not the
+    shard's slice. Shards have equal sizes and equal slices, so the pooled
+    sample is a uniform mixture whose time density is :math:`1/T` over the full
+    window; that is the density the pooled injections were drawn from.
+
+    Parameters
+    ----------
+    config : MDCConfig
+        Run configuration; ``sensitivity_n_per_shard`` must be positive.
+    shard_id : int
+        Shard index in ``[0, config.sensitivity_n_shards)``.
+    backend : DetectionBackend or None, optional
+        Waveform engine; defaults to :class:`~bagpuss.mdc.detection.MinkeBackend`.
+
+    Returns
+    -------
+    dict
+        Summary with ``shard_id``, ``n_total`` and ``n_detected``.
+    """
+    if not config.sensitivity_enabled:
+        raise ValueError("sensitivity injections are disabled (n_per_shard is 0)")
+    t_start, t_end = sensitivity_time_bounds(config, shard_id)
+    n = config.sensitivity_n_per_shard
+    rng = shard_rng(config, "sensitivity", shard_id)
+
+    shard = build_sensitivity_distribution(config, t_start, t_end)
+    injections = draw_injections(shard, n, rng)
+    # The pooled sample is drawn from the full-window density (see above).
+    injections.log_p_draw = build_sensitivity_distribution(config).log_prob(
+        injections.as_dict()
+    )
+
+    backend = backend if backend is not None else MinkeBackend()
+    detector_names = list(config.detectors)
+    network_snr = np.zeros(n, dtype=np.float64)
+    active = np.zeros((n, len(detector_names)), dtype=bool)
+    params = backend.injection_parameters(
+        InjectionSet(host_galaxy_index=np.full(n, -1), **injections.as_dict()),
+        config.f_ref,
+    )
+    window = _observation_window(config)
+    schedules = backend.duty_schedules(
+        config, window[0], window[1], shard_rng(config, "duty", 0)
+    )
+    for i, event in enumerate(params):
+        observing = backend.active_detectors(
+            schedules, config.detectors, event["gpstime"]
+        )
+        active[i] = [d in observing for d in detector_names]
+        if observing:
+            _, network_snr[i] = backend.inject(event, observing, config, None)
+
+    group = (
+        _open_store(config, mode="a")
+        .require_group("sensitivity")
+        .require_group(_shard_name(shard_id))
+    )
+    injections.to_zarr(group, network_snr=network_snr)
+    group.create_array("active", data=active, overwrite=True)
+    n_detected = int(np.sum(network_snr >= config.snr_threshold))
+    group.attrs.update(
+        _provenance_attrs(
+            config,
+            shard_id=shard_id,
+            n_total=n,
+            n_detected=n_detected,
+            snr_threshold=config.snr_threshold,
+            detectors=detector_names,
+        )
+    )
+    return {"shard_id": shard_id, "n_total": n, "n_detected": n_detected}
+
+
+def assemble_sensitivity(
+    config: MDCConfig, raise_on_failure: bool = True
+) -> dict[str, Any]:
+    """Validate all sensitivity shards (the sensitivity DAG's assembly node).
+
+    Mirrors :func:`assemble_injections`. Checks that every shard is present,
+    holds exactly ``sensitivity_n_per_shard`` draws (the pooled density is only
+    the full-window one if shards are equal), has finite, non-negative SNRs and
+    finite draw densities, and that the injections lie inside the distribution's
+    support. Records the totals in ``<store>/sensitivity.attrs``.
+
+    Raises
+    ------
+    MDCValidationError
+        If ``raise_on_failure`` and any check fails.
+    """
+    root = _open_store(config, mode="a")
+    group = root.require_group("sensitivity")
+    present = set(group.group_keys())
+    distribution = build_sensitivity_distribution(config)
+    issues: list[str] = []
+    index: list[dict[str, Any]] = []
+    offset = 0
+    n_total = 0
+    n_detected = 0
+
+    for shard_id in range(config.sensitivity_n_shards):
+        name = _shard_name(shard_id)
+        if name not in present:
+            issues.append(f"missing sensitivity shard: {name}")
+            continue
+        shard = group.require_group(name)
+        injections = SensitivityInjectionSet.from_zarr(shard)
+        snr = np.asarray(shard["network_snr"])
+        n = len(injections)
+        if (
+            injections.n_total != config.sensitivity_n_per_shard
+            or n != injections.n_total
+        ):
+            issues.append(
+                f"{name} holds {n} injections with n_total={injections.n_total}, "
+                f"expected {config.sensitivity_n_per_shard}"
+            )
+        if snr.shape != (n,) or not np.all(np.isfinite(snr)) or np.any(snr < 0.0):
+            issues.append(f"{name} has missing, non-finite or negative SNRs")
+        if not np.all(np.isfinite(injections.log_p_draw)):
+            issues.append(f"{name} has injections outside the distribution's support")
+        elif not np.allclose(
+            injections.log_p_draw, distribution.log_prob(injections.as_dict())
+        ):
+            issues.append(f"{name} has stale or inconsistent draw densities")
+        t_lo, t_hi = sensitivity_time_bounds(config, shard_id)
+        if n and (
+            injections.geocent_time.min() < t_lo or injections.geocent_time.max() > t_hi
+        ):
+            issues.append(f"{name} has injections outside its time slice")
+        detected = int(np.sum(snr >= config.snr_threshold))
+        index.append(
+            {
+                "shard_id": shard_id,
+                "n_total": injections.n_total,
+                "n_detected": detected,
+                "offset": offset,
+            }
+        )
+        offset += n
+        n_total += injections.n_total
+        n_detected += detected
+
+    group.attrs.update(
+        {
+            "_index": index,
+            "_n_total": n_total,
+            "_n_detected": n_detected,
+            "_snr_threshold": config.snr_threshold,
+        }
+    )
+    zarr.consolidate_metadata(root.store)
+    report = {
+        "ok": not issues,
+        "n_shards": len(index),
+        "n_total": n_total,
+        "n_detected": n_detected,
+        "issues": issues,
+    }
+    if not report["ok"] and raise_on_failure:
+        raise MDCValidationError(report)
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Stage 5: package manifest
 # ---------------------------------------------------------------------------
 
@@ -1141,6 +1422,9 @@ def package_manifest(config: MDCConfig) -> dict[str, Any]:
     detections_attrs = (
         root["detections"].attrs if "detections" in root.group_keys() else {}
     )
+    sensitivity_attrs = (
+        root["sensitivity"].attrs if "sensitivity" in root.group_keys() else {}
+    )
     manifest = {
         "bagpuss_version": bagpuss.__version__,
         "config": asdict(config),
@@ -1150,6 +1434,8 @@ def package_manifest(config: MDCConfig) -> dict[str, Any]:
         "total_injections": root["injections"].attrs.get("_total_injections"),
         "total_detectable": detections_attrs.get("_total_detectable"),
         "snr_threshold": detections_attrs.get("_snr_threshold"),
+        "sensitivity_n_total": sensitivity_attrs.get("_n_total"),
+        "sensitivity_n_detected": sensitivity_attrs.get("_n_detected"),
     }
     root.attrs.update({"mdc_manifest": manifest})
     zarr.consolidate_metadata(root.store)

@@ -454,6 +454,43 @@ def mdc_assemble_detections(config: Path) -> None:
     )
 
 
+@mdc.command("generate-sensitivity")
+@_CONFIG_OPTION
+@click.option(
+    "--shard-id", type=int, required=True, help="Sensitivity-shard index to generate."
+)
+def mdc_generate_sensitivity(config: Path, shard_id: int) -> None:
+    """Draw one shard of sensitivity injections and compute their SNRs."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import generate_sensitivity_shard
+
+    cfg = load_config(config)
+    summary = generate_sensitivity_shard(cfg, shard_id)
+    click.echo(
+        f"sensitivity shard {shard_id}: {summary['n_detected']}/{summary['n_total']} "
+        f"injections above SNR {cfg.snr_threshold}"
+    )
+
+
+@mdc.command("assemble-sensitivity")
+@_CONFIG_OPTION
+def mdc_assemble_sensitivity(config: Path) -> None:
+    """Validate the sensitivity shards (the sensitivity DAG's assembly node)."""
+    from bagpuss.mdc.config import load_config
+    from bagpuss.mdc.pipeline import MDCValidationError, assemble_sensitivity
+
+    cfg = load_config(config)
+    try:
+        report = assemble_sensitivity(cfg)
+    except MDCValidationError as exc:
+        click.echo(f"Sensitivity validation FAILED: {exc.report['issues']}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"{report['n_detected']}/{report['n_total']} sensitivity injections "
+        f"detected across {report['n_shards']} shards"
+    )
+
+
 @mdc.command("export-release")
 @_CONFIG_OPTION
 @click.option(
@@ -548,6 +585,106 @@ def mdc_verify_release(release_dir: Path) -> None:
         click.echo(issue, err=True)
     click.echo("release OK" if report["ok"] else "release FAILED")
     if not report["ok"]:
+        raise SystemExit(1)
+
+
+@mdc.command("fit-population")
+@click.argument("release_dir", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--out-dir",
+    type=click.Path(path_type=Path),
+    default=Path("population_fit"),
+    show_default=True,
+    help="Where to write the sampler output and summary.json.",
+)
+@click.option(
+    "--free",
+    default=",".join(("alpha", "beta", "lam", "mpp", "sigpp", "lamb")),
+    show_default=True,
+    help="Comma-separated hyperparameters to fit; the rest are held at the truth.",
+)
+@click.option("--nlive", type=int, default=500, show_default=True)
+@click.option(
+    "--mass-grid",
+    default="1000,500",
+    show_default=True,
+    help="n_m1,n_q of the grid the mass model is normalised on.",
+)
+@click.option("--sampler", default="dynesty", show_default=True)
+@click.option("--seed", type=int, default=1, show_default=True)
+@click.option(
+    "--credible-level",
+    type=float,
+    default=0.99,
+    show_default=True,
+    help="Central credible interval the truth is tested against.",
+)
+def mdc_fit_population(  # noqa: PLR0913
+    release_dir: Path,
+    out_dir: Path,
+    free: str,
+    nlive: int,
+    mass_grid: str,
+    sampler: str,
+    seed: int,
+    credible_level: float,
+) -> None:
+    """Recover the population of a release from its detectable events.
+
+    Fits the mass and redshift hyperparameters with gwpopulation at the events'
+    true parameters, correcting for selection with the release's sensitivity
+    injections, and reports where the true values lie in the posterior.
+    Needs the ``population`` extra.
+    """
+    import json
+    from dataclasses import asdict
+
+    from bagpuss.population_inference import (
+        fit_population,
+        load_release,
+        summarise,
+    )
+
+    inputs = load_release(release_dir)
+    names = [n.strip() for n in free.split(",") if n.strip()]
+    grid = mass_grid.split(",")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    samples, _ = fit_population(
+        inputs.posteriors,
+        inputs.selection,
+        inputs.truth,
+        z_max=inputs.z_max,
+        cosmology=inputs.cosmology,
+        mass_grid=(int(grid[0]), int(grid[1])),
+        free=names,
+        sampler=sampler,
+        outdir=str(out_dir),
+        seed=seed,
+        nlive=nlive,
+    )
+    rows = summarise(
+        {n: samples[n].to_numpy() for n in names}, inputs.truth, credible_level
+    )
+    (out_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "n_events": len(inputs.posteriors),
+                "credible_level": credible_level,
+                "parameters": [asdict(r) for r in rows],
+            },
+            indent=2,
+        )
+    )
+    click.echo(
+        f"{len(inputs.posteriors)} events; truth vs {credible_level:.0%} interval"
+    )
+    for r in rows:
+        click.echo(
+            f"{r.name:8s} truth {r.truth:8.3f}  median {r.median:8.3f} "
+            f"[{r.lower:8.3f}, {r.upper:8.3f}]  z={r.z_score:+5.2f}  "
+            f"{'ok' if r.inside else 'OUTSIDE'}"
+        )
+    if not all(r.inside for r in rows):
         raise SystemExit(1)
 
 
@@ -664,12 +801,19 @@ def mdc_expected_count(
     help="Render only the detection stage, for an already-generated store "
     "(never regenerates the catalogue or injections).",
 )
-def mdc_make_dag(
+@click.option(
+    "--sensitivity-only",
+    is_flag=True,
+    help="Render only the sensitivity-injection campaign, for an "
+    "already-generated store (needs sensitivity.n_per_shard > 0).",
+)
+def mdc_make_dag(  # noqa: PLR0913
     config: Path,
     out_dir: Path,
     bagpuss_executable: str,
     skip_detection: bool,
     detection_only: bool,
+    sensitivity_only: bool,
 ) -> None:
     """Render the HTCondor DAG and submit files for a run, without submitting."""
     from bagpuss.mdc.condor import write_dag
@@ -683,8 +827,10 @@ def mdc_make_dag(
         bagpuss_executable,
         include_detection=not skip_detection,
         include_generation=not detection_only,
+        sensitivity_only=sensitivity_only,
     )
     click.echo(
-        f"Wrote DAG ({cfg.n_tiles} tiles, {cfg.n_injection_shards} shards) "
-        f"to {dag_path}"
+        f"Wrote DAG ({cfg.n_tiles} tiles, {cfg.n_injection_shards} shards, "
+        f"{cfg.sensitivity_n_shards if cfg.sensitivity_enabled else 0} "
+        f"sensitivity shards) to {dag_path}"
     )

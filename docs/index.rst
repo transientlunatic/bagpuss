@@ -14,6 +14,8 @@ gravitational-wave catalogues for testing cosmological inference pipelines.
    catalogue
    population
    injection
+   sensitivity
+   population_inference
    mdc
    plotting
    autoapi/index
