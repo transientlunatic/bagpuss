@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- The event blueprint's `trigger` includes the injected in-plane spins
+  (`spin1x`, `spin1y`, `spin2x`, `spin2y`), so that PE codes such as simple-pe
+  start from a precessing trigger.
 - `bagpuss.population_inference` and `bagpuss mdc fit-population`: recover the
   mass and redshift hyperparameters of a release's detectable events with
   `gwpopulation`, using the sensitivity injections for the selection effect
