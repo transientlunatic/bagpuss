@@ -142,6 +142,19 @@ class TestBayestarLocalizer(unittest.TestCase):
         result, _ = self._localize(_Recorder(fail_on="bayestar-localize-coincs"))
         self.assertIsNone(result)
 
+    def test_missing_tool_raises(self) -> None:
+        """A missing BAYESTAR executable is a set-up error, not a skipped skymap."""
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(BayestarLocalizer, "_write_injection_table"),
+            mock.patch("subprocess.run", side_effect=FileNotFoundError("no tool")),
+        ):
+            localizer = BayestarLocalizer(bin_dir=Path("/opt/bin"))
+            with self.assertRaisesRegex(RuntimeError, "bayestar"):
+                localizer.localize(
+                    _EVENT, _OBSERVING, _PSDS, 7, Path(tmp) / "event.fits"
+                )
+
     def test_no_coincidence_returns_none(self) -> None:
         """If the simulated triggers produced no coincidence there is no skymap."""
         result, _ = self._localize(_Recorder(n_fits=0))

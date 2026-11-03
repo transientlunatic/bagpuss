@@ -27,6 +27,11 @@
   from, and `bagpuss.mdc.pipeline.build_population_log_prob` for the run's
   true population.
 
+### Fixed
+- `BayestarLocalizer` raises when a `bayestar-*` executable is missing instead
+  of returning no skymap, which silently dropped every skymap of a detection
+  run in an overlay venv whose `bin/` lacks those scripts.
+
 ## 0.3.0
 
 Injection sets, and therefore MDC releases, produced by 0.2.0 are not
