@@ -120,7 +120,7 @@ class TestSimplePESamples(unittest.TestCase):
             ("mass_ratio", 0.9),
             ("redshift", 0.175),
         ):
-            mean = float(np.average(df[name][box].to_numpy(), weights=w))
+            mean = float(np.average(df[name][box].to_numpy(), weights=w))  # pyright: ignore[reportAttributeAccessIssue]
             self.assertAlmostEqual(mean / centre, 1.0, delta=0.02, msg=name)
 
     def test_weights_enter_the_prior(self) -> None:
@@ -167,7 +167,7 @@ class TestAgreementWithGWPopulation(unittest.TestCase):
         """One sample per event, at the true values."""
         out = event_samples(np.array([30.0, 40.0]), np.array([15.0, 20.0]), np.ones(2))
         self.assertEqual(len(out), 2)
-        self.assertAlmostEqual(float(out[0]["mass_ratio"][0]), 0.5)
+        self.assertAlmostEqual(float(out[0]["mass_ratio"][0]), 0.5)  # pyright: ignore[reportArgumentType]
 
     def test_mass_density(self) -> None:
         """The gwpopulation mass model is the bagpuss one, in (m1, q)."""

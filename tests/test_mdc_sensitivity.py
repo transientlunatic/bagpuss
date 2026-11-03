@@ -182,8 +182,8 @@ class TestGenerateSensitivityShard(unittest.TestCase):
             root = zarr.open_group(cfg.store, mode="r", use_consolidated=False)
             group = root["sensitivity"]["shard_0001"]
             injections = SensitivityInjectionSet.from_zarr(group)
-            snr = np.asarray(group["network_snr"])
-            active = np.asarray(group["active"])
+            snr = np.asarray(group["network_snr"])  # pyright: ignore[reportCallIssue]
+            active = np.asarray(group["active"])  # pyright: ignore[reportCallIssue]
         self.assertEqual(len(injections), _N_PER_SHARD)
         self.assertEqual(injections.n_total, _N_PER_SHARD)
         self.assertEqual(snr.shape, (_N_PER_SHARD,))
@@ -198,7 +198,7 @@ class TestGenerateSensitivityShard(unittest.TestCase):
             cfg = _config(tmp)
             generate_sensitivity_shard(cfg, 2, _FakeBackend())
             root = zarr.open_group(cfg.store, mode="r", use_consolidated=False)
-            t = np.asarray(root["sensitivity"]["shard_0002"]["geocent_time"])
+            t = np.asarray(root["sensitivity"]["shard_0002"]["geocent_time"])  # pyright: ignore[reportCallIssue]
         lo, hi = sensitivity_time_bounds(cfg, 2)
         self.assertTrue(np.all((t >= lo) & (t <= hi)))
 
@@ -228,7 +228,7 @@ class TestGenerateSensitivityShard(unittest.TestCase):
             cfg = _config(tmp)
             generate_sensitivity_shard(cfg, 2, _FakeBackend())
             root = zarr.open_group(cfg.store, mode="r", use_consolidated=False)
-            active = np.asarray(root["sensitivity"]["shard_0002"]["active"])
+            active = np.asarray(root["sensitivity"]["shard_0002"]["active"])  # pyright: ignore[reportCallIssue]
         names = list(cfg.detectors)
         livingston = names.index("AdvancedLIGOLivingston")
         self.assertFalse(active[:, livingston].any())
@@ -308,7 +308,7 @@ class TestPooledEstimate(unittest.TestCase):
         ]
         snr = np.concatenate(
             [
-                np.asarray(root["sensitivity"][f"shard_{i:04d}"]["network_snr"])
+                np.asarray(root["sensitivity"][f"shard_{i:04d}"]["network_snr"])  # pyright: ignore[reportCallIssue]
                 for i in range(cfg.sensitivity_n_shards)
             ]
         )

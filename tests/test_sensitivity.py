@@ -52,7 +52,7 @@ class TestInjectionDistribution(unittest.TestCase):
     def test_luminosity_distance_follows_fiducial_cosmology(self) -> None:
         """Luminosity distance follows fiducial cosmology."""
         inj = draw_injections(_dist(), 200, np.random.default_rng(1))
-        expected = Planck18.luminosity_distance(inj.redshift).to("Mpc").value
+        expected = Planck18.luminosity_distance(inj.redshift).to("Mpc").value  # pyright: ignore[reportAttributeAccessIssue]
         np.testing.assert_allclose(inj.luminosity_distance, expected)
 
     def test_reproducible_with_seed(self) -> None:
@@ -133,7 +133,7 @@ class TestDetectionEstimate(unittest.TestCase):
         z_star = float(
             np.interp(
                 d_max,
-                Planck18.luminosity_distance(np.linspace(1e-4, 1.0, 4000)).value,
+                Planck18.luminosity_distance(np.linspace(1e-4, 1.0, 4000)).value,  # pyright: ignore[reportAttributeAccessIssue]
                 np.linspace(1e-4, 1.0, 4000),
             )
         )

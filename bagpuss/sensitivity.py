@@ -201,7 +201,7 @@ class InjectionDistribution:
 
         self._z_grid = np.linspace(0.0, self.z_max, _REDSHIFT_GRID_SIZE)
         weight = (1.0 + self._z_grid) ** (self.kappa - 1.0) * np.asarray(
-            cosmology.differential_comoving_volume(self._z_grid).value
+            cosmology.differential_comoving_volume(self._z_grid).value  # pyright: ignore[reportAttributeAccessIssue]
         )
         cdf = np.concatenate(
             [[0.0], np.cumsum(0.5 * (weight[:-1] + weight[1:]) * np.diff(self._z_grid))]
@@ -225,7 +225,7 @@ class InjectionDistribution:
         q = _pl_sample(self.beta_q, self.m_min / m1, 1.0, rng.uniform(size=n))
         redshift = np.interp(rng.uniform(size=n), self._z_cdf, self._z_grid)
         luminosity_distance = np.asarray(
-            self.cosmology.luminosity_distance(redshift).to("Mpc").value
+            self.cosmology.luminosity_distance(redshift).to("Mpc").value  # pyright: ignore[reportAttributeAccessIssue]
         )
         return {
             "m1_source": m1,

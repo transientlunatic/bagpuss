@@ -71,6 +71,11 @@ _PRIOR_RANGES: dict[str, tuple[float, float]] = {
 }
 
 
+def _attr_float(attrs: Any, name: str) -> float:  # noqa: ANN401
+    """Return a scalar HDF5 attribute as a float (h5py types its values loosely)."""
+    return float(attrs[name])
+
+
 def true_hyperparameters(
     mass: PowerLawPlusPeakMassDistribution, lamb: float = 0.0
 ) -> dict[str, float]:
@@ -414,10 +419,12 @@ def fit_population(
         outdir=outdir,
         label=label,
         seed=seed,
-        save="hdf5",
+        save="hdf5",  # pyright: ignore[reportArgumentType]
         clean=True,
         **sampler_kwargs,
     )
+    if result is None:
+        raise RuntimeError("bilby returned no result")
     samples = result.posterior
     return samples, summarise({n: samples[n].to_numpy() for n in free}, truth)
 
@@ -502,7 +509,7 @@ def simplepe_samples(
     weight = weight / weight.mean()
 
     z_grid = np.linspace(0.0, 6.0, 6001)
-    d_grid = np.asarray(cosmology.luminosity_distance(z_grid).to("Mpc").value)
+    d_grid = np.asarray(cosmology.luminosity_distance(z_grid).to("Mpc").value)  # pyright: ignore[reportAttributeAccessIssue]
     z = np.interp(d_l, d_grid, z_grid)
     d_dz = np.interp(z, z_grid, np.gradient(d_grid, z_grid))
 
@@ -627,13 +634,13 @@ def load_release(
     )
     with h5py.File(root / "sensitivity.h5", "r") as fh:
         attrs = cast(h5py.Group, fh["injections"]).attrs
-        threshold = float(attrs["snr_threshold"])
+        threshold = _attr_float(attrs, "snr_threshold")
         distribution = InjectionDistribution(
             cosmology=_load_cosmology(str(attrs["cosmology"])),
-            t_start=float(attrs["t_start"]),
-            t_end=float(attrs["t_end"]),
+            t_start=_attr_float(attrs, "t_start"),
+            t_end=_attr_float(attrs, "t_end"),
             **{
-                name: float(attrs[name])
+                name: _attr_float(attrs, name)
                 for name in ("z_max", "m_min", "m_max", "alpha", "beta_q", "kappa")
             },
         )
