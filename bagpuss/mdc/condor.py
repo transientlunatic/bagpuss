@@ -12,6 +12,11 @@ up the shape described in :mod:`bagpuss.mdc.pipeline`::
                     CHILD of  assemble_detections
                         CHILD of  package_manifest
 
+    sensitivity_shard_0000 .. sensitivity_shard_KKKK   (parallel; only if the
+        CHILD of  assemble_sensitivity                  config has a sensitivity
+            CHILD of  package_manifest                  campaign; independent of
+                                                        everything above)
+
 Each node's own exit status is the go/no-go gate between tiers:
 ``consolidate_catalogue``/``assemble_injections``/``assemble_detections`` raise
 :class:`~bagpuss.mdc.pipeline.MDCValidationError` (nonzero exit, via the
@@ -79,6 +84,13 @@ DEFAULT_RESOURCES: dict[str, CondorResources] = {
     "package_manifest": CondorResources(
         request_cpus=1, request_memory="2GB", request_disk="2GB"
     ),
+    # Draws and computes the SNR of every injection in the shard (no frames).
+    "sensitivity_shard": CondorResources(
+        request_cpus=1, request_memory="4GB", request_disk="2GB"
+    ),
+    "assemble_sensitivity": CondorResources(
+        request_cpus=1, request_memory="4GB", request_disk="2GB"
+    ),
 }
 
 _SUBMIT_TEMPLATE = """\
@@ -107,6 +119,8 @@ _LOG_STEMS: dict[str, str] = {
     "detect_shard": "detect_shard_$(shard_id)",
     "assemble_detections": "assemble_detections",
     "package_manifest": "package_manifest",
+    "sensitivity_shard": "sensitivity_shard_$(shard_id)",
+    "assemble_sensitivity": "assemble_sensitivity",
 }
 
 
@@ -153,6 +167,13 @@ def _write_submit_files(
         "assemble_detections": f"mdc assemble-detections --config {config_path}",
         "package_manifest": f"mdc package --config {config_path}",
     }
+    if config.sensitivity_enabled:
+        specs["sensitivity_shard"] = (
+            f"mdc generate-sensitivity --config {config_path} --shard-id $(shard_id)"
+        )
+        specs["assemble_sensitivity"] = (
+            f"mdc assemble-sensitivity --config {config_path}"
+        )
     paths: dict[str, Path] = {}
     for name, arguments in specs.items():
         text = _render_submit_file(
@@ -169,6 +190,8 @@ def _render_dag(
     submit_paths: dict[str, Path],
     include_detection: bool = True,
     include_generation: bool = True,
+    include_sensitivity: bool = True,
+    sensitivity_only: bool = False,
 ) -> str:
     """Render the full ``mdc.dag`` contents for *config*.
 
@@ -177,10 +200,24 @@ def _render_dag(
     ``include_generation=False`` the catalogue/injection nodes are omitted
     and the DAG starts at the detection shards (for re-running detection
     against an already-generated store).
+
+    If the config has a sensitivity campaign (``sensitivity_n_per_shard > 0``)
+    its shards are added, as a branch independent of the catalogue and event
+    set, unless ``include_sensitivity=False``. With ``sensitivity_only=True``
+    the DAG holds nothing else (for adding a campaign to an already-generated
+    store).
     """
-    if not include_generation and not include_detection:
+    if sensitivity_only:
+        if not config.sensitivity_enabled:
+            raise ValueError("sensitivity_only needs sensitivity.n_per_shard > 0")
+        include_generation = include_detection = False
+    elif not include_generation and not include_detection:
         raise ValueError("a DAG with neither generation nor detection is empty")
+    with_sensitivity = config.sensitivity_enabled and (
+        include_sensitivity or sensitivity_only
+    )
     lines: list[str] = []
+    package_parents: list[str] = []
 
     if include_generation:
         tile_names = [f"catalogue_tile_{i:04d}" for i in range(config.n_tiles)]
@@ -228,13 +265,27 @@ def _render_dag(
         lines.append("RETRY assemble_detections 2")
         lines.append(f"PARENT {' '.join(detect_names)} CHILD assemble_detections")
         lines.append("")
-        last = "assemble_detections"
-    else:
-        last = "assemble_injections"
+        package_parents.append("assemble_detections")
+    elif include_generation:
+        package_parents.append("assemble_injections")
+
+    if with_sensitivity:
+        sens_names = [
+            f"sensitivity_shard_{i:04d}" for i in range(config.sensitivity_n_shards)
+        ]
+        for i, name in enumerate(sens_names):
+            lines.append(f"JOB {name} {submit_paths['sensitivity_shard']}")
+            lines.append(f'VARS {name} shard_id="{i:04d}"')
+            lines.append(f"RETRY {name} 2")
+        lines.append(f"JOB assemble_sensitivity {submit_paths['assemble_sensitivity']}")
+        lines.append("RETRY assemble_sensitivity 2")
+        lines.append(f"PARENT {' '.join(sens_names)} CHILD assemble_sensitivity")
+        lines.append("")
+        package_parents.append("assemble_sensitivity")
 
     lines.append(f"JOB package_manifest {submit_paths['package_manifest']}")
     lines.append("RETRY package_manifest 2")
-    lines.append(f"PARENT {last} CHILD package_manifest")
+    lines.append(f"PARENT {' '.join(package_parents)} CHILD package_manifest")
     lines.append("")
 
     return "\n".join(lines)
@@ -248,6 +299,8 @@ def write_dag(
     resources: dict[str, CondorResources] | None = None,
     include_detection: bool = True,
     include_generation: bool = True,
+    include_sensitivity: bool = True,
+    sensitivity_only: bool = False,
 ) -> Path:
     """Render and write the full DAG plus submit files for *config*.
 
@@ -278,6 +331,12 @@ def write_dag(
     include_generation : bool, optional
         If ``False``, omit catalogue and injection generation, so the DAG
         only (re-)runs detection against an already-generated store.
+    include_sensitivity : bool, optional
+        If ``False``, omit the sensitivity-injection shards even when the
+        config has a campaign.
+    sensitivity_only : bool, optional
+        Render only the sensitivity campaign (plus the manifest), for adding it
+        to an already-generated store. Needs ``sensitivity.n_per_shard > 0``.
 
     Returns
     -------
@@ -296,7 +355,14 @@ def write_dag(
     submit_paths = _write_submit_files(
         config, config_path, out_dir, log_dir, bagpuss_executable, merged_resources
     )
-    dag_text = _render_dag(config, submit_paths, include_detection, include_generation)
+    dag_text = _render_dag(
+        config,
+        submit_paths,
+        include_detection,
+        include_generation,
+        include_sensitivity,
+        sensitivity_only,
+    )
 
     dag_path = out_dir / "mdc.dag"
     dag_path.write_text(dag_text)

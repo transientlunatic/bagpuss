@@ -17,7 +17,7 @@ hand-off only.
 
 On disk, a config file is a nested YAML mapping whose top-level sections
 mirror the pipeline's stages (``galaxies``, ``population``,
-``observation``, ``detection``, ``estimation``, ``sharding``, ``run``);
+``observation``, ``detection``, ``estimation``, ``sharding``, ``sensitivity``, ``run``);
 :func:`load_config` flattens it against :data:`_SCHEMA` into
 :class:`MDCConfig`'s (flat) fields.
 """
@@ -132,6 +132,24 @@ class MDCConfig:
         fails on triggers at the equal-mass limit (``eta = 0.25``), where
         its metric scaling steps past the physical bound, so ~0.249 avoids
         that. ``None`` leaves the trigger at the injected values.
+    sensitivity_n_shards, sensitivity_n_per_shard : int
+        Size of the sensitivity-injection campaign (see
+        :mod:`bagpuss.sensitivity`): ``sensitivity_n_shards`` shards of
+        ``sensitivity_n_per_shard`` draws each, the shards being equal slices of
+        the observation window. ``sensitivity_n_per_shard = 0`` (the default)
+        disables the campaign.
+    sensitivity_z_max, sensitivity_m_min, sensitivity_m_max : float
+        Support of the (deliberately broad) injection distribution: maximum
+        redshift and source-frame component-mass range. It must contain the
+        support of every population the selection function will be evaluated
+        for.
+    sensitivity_alpha, sensitivity_beta_q, sensitivity_kappa : float
+        Primary-mass power-law index, mass-ratio index and redshift-evolution
+        index of the injection distribution
+        (:class:`~bagpuss.sensitivity.InjectionDistribution`).
+    sensitivity_min_snr : float
+        Injections with a network SNR below this are left out of the released
+        sensitivity table, but still count in its total number of draws.
     n_ra_tiles, n_dec_tiles : int
         Number of equal-area sky tiles along right ascension and
         ``sin(dec)`` respectively. Stage-1 (catalogue) generation runs one
@@ -220,6 +238,16 @@ class MDCConfig:
     n_ra_tiles: int = 1
     n_dec_tiles: int = 1
     n_injection_shards: int = 1
+
+    sensitivity_n_shards: int = 1
+    sensitivity_n_per_shard: int = 0
+    sensitivity_z_max: float = 3.0
+    sensitivity_m_min: float = 5.0
+    sensitivity_m_max: float = 200.0
+    sensitivity_alpha: float = 2.0
+    sensitivity_beta_q: float = 0.0
+    sensitivity_kappa: float = 0.0
+    sensitivity_min_snr: float = 4.0
     rate_density: float = 2.4e-8  # Mpc^-3 yr^-1, ~ GWTC-3 local BBH rate
 
     master_seed: int = 0
@@ -248,6 +276,26 @@ class MDCConfig:
             raise ValueError(
                 f"n_injection_shards must be >= 1, got {self.n_injection_shards!r}"
             )
+        if self.sensitivity_n_shards < 1:
+            raise ValueError(
+                f"sensitivity.n_shards must be >= 1, got {self.sensitivity_n_shards!r}"
+            )
+        if self.sensitivity_n_per_shard < 0:
+            raise ValueError(
+                "sensitivity.n_per_shard must be >= 0, got "
+                f"{self.sensitivity_n_per_shard!r}"
+            )
+        if self.sensitivity_min_snr > self.snr_threshold:
+            raise ValueError(
+                "sensitivity.min_snr must not exceed detection.snr_threshold "
+                f"(got {self.sensitivity_min_snr!r} > {self.snr_threshold!r}), "
+                "or detected injections would be dropped from the release"
+            )
+
+    @property
+    def sensitivity_enabled(self) -> bool:
+        """Return whether a sensitivity-injection campaign is configured."""
+        return self.sensitivity_n_per_shard > 0
 
     @property
     def n_tiles(self) -> int:
@@ -314,6 +362,17 @@ _SCHEMA: dict[str, Any] = {
         "n_dec_tiles": "n_dec_tiles",
         "n_injection_shards": "n_injection_shards",
     },
+    "sensitivity": {
+        "n_shards": "sensitivity_n_shards",
+        "n_per_shard": "sensitivity_n_per_shard",
+        "z_max": "sensitivity_z_max",
+        "m_min": "sensitivity_m_min",
+        "m_max": "sensitivity_m_max",
+        "alpha": "sensitivity_alpha",
+        "beta_q": "sensitivity_beta_q",
+        "kappa": "sensitivity_kappa",
+        "min_snr": "sensitivity_min_snr",
+    },
     "run": {
         "master_seed": "master_seed",
         "store": "store",
@@ -360,7 +419,7 @@ def load_config(path: str | Path) -> MDCConfig:
 
     The file's keys are matched against :data:`_SCHEMA`'s nested sections
     (``galaxies``, ``population``, ``observation``, ``detection``,
-    ``estimation``, ``sharding``, ``run``) and applied over
+    ``estimation``, ``sharding``, ``sensitivity``, ``run``) and applied over
     :class:`MDCConfig`'s defaults; any key that isn't recognised at its
     nesting level raises an error, to catch typos early rather than
     silently ignoring them.

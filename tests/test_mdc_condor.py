@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from bagpuss.mdc.condor import CondorResources, write_dag
 from bagpuss.mdc.config import MDCConfig
@@ -191,3 +192,86 @@ class TestWriteDag(unittest.TestCase):
         ]
         for name in job_names:
             self.assertIn(f"RETRY {name} ", text)
+
+
+class TestSensitivityDag(unittest.TestCase):
+    """The optional sensitivity-injection branch of the DAG."""
+
+    def _dag(self, cfg: MDCConfig, **kwargs: Any) -> tuple[str, Path]:  # noqa: ANN401
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "dag"
+            dag_path = write_dag(cfg, "c.yaml", out_dir, "/x/bagpuss", **kwargs)
+            files = sorted(p.name for p in out_dir.glob("*.sub"))
+            return dag_path.read_text(), Path(",".join(files))
+
+    def test_absent_without_a_campaign(self) -> None:
+        """A config with no campaign renders exactly the DAG it always did."""
+        text, files = self._dag(MDCConfig(n_injection_shards=2))
+        self.assertNotIn("sensitivity", text)
+        self.assertNotIn("sensitivity", str(files))
+
+    def test_branch_added_when_configured(self) -> None:
+        """Sensitivity shards are independent of the catalogue and event set."""
+        cfg = MDCConfig(
+            n_injection_shards=2, sensitivity_n_shards=3, sensitivity_n_per_shard=10
+        )
+        text, files = self._dag(cfg)
+        self.assertEqual(text.count("JOB sensitivity_shard_"), 3)
+        self.assertIn(
+            "PARENT sensitivity_shard_0000 sensitivity_shard_0001 "
+            "sensitivity_shard_0002 CHILD assemble_sensitivity",
+            text,
+        )
+        self.assertIn(
+            "PARENT assemble_detections assemble_sensitivity CHILD package_manifest",
+            text,
+        )
+        # No sensitivity shard waits for the catalogue or the event set.
+        self.assertNotIn("CHILD sensitivity_shard", text)
+        self.assertIn("sensitivity_shard.sub", str(files))
+        self.assertIn("assemble_sensitivity.sub", str(files))
+
+    def test_can_be_left_out(self) -> None:
+        """include_sensitivity=False drops the branch even when configured."""
+        cfg = MDCConfig(sensitivity_n_per_shard=10)
+        text, _ = self._dag(cfg, include_sensitivity=False)
+        self.assertNotIn("sensitivity", text)
+
+    def test_sensitivity_only(self) -> None:
+        """A DAG for adding a campaign to an existing store holds nothing else."""
+        cfg = MDCConfig(
+            n_ra_tiles=2,
+            n_injection_shards=2,
+            sensitivity_n_shards=2,
+            sensitivity_n_per_shard=10,
+        )
+        text, _ = self._dag(cfg, sensitivity_only=True)
+        self.assertNotIn("catalogue_tile", text)
+        self.assertNotIn("injection_shard", text)
+        self.assertNotIn("detect_shard", text)
+        self.assertEqual(text.count("JOB sensitivity_shard_"), 2)
+        self.assertIn("PARENT assemble_sensitivity CHILD package_manifest", text)
+
+    def test_sensitivity_only_needs_a_campaign(self) -> None:
+        """Asking for just the campaign when there is none is an error."""
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValueError):
+            write_dag(
+                MDCConfig(),
+                "c.yaml",
+                Path(tmp) / "d",
+                "/x/bagpuss",
+                sensitivity_only=True,
+            )
+
+    def test_submit_files_run_the_new_commands(self) -> None:
+        """The sensitivity jobs call the matching bagpuss mdc subcommands."""
+        cfg = MDCConfig(sensitivity_n_per_shard=10)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "dag"
+            write_dag(cfg, "c.yaml", out_dir, "/x/bagpuss")
+            shard = (out_dir / "sensitivity_shard.sub").read_text()
+            assemble = (out_dir / "assemble_sensitivity.sub").read_text()
+        self.assertIn("mdc generate-sensitivity --config c.yaml", shard)
+        self.assertIn("--shard-id $(shard_id)", shard)
+        self.assertIn("sensitivity_shard_$(shard_id).log", shard)
+        self.assertIn("mdc assemble-sensitivity --config c.yaml", assemble)

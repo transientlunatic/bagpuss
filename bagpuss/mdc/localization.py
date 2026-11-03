@@ -238,6 +238,13 @@ class BayestarLocalizer:
                 if len(fits) != 1:
                     return None
                 shutil.move(str(fits[0]), str(out_path))
+        except FileNotFoundError as exc:
+            # A missing tool would otherwise silently drop every skymap (e.g. in
+            # an overlay venv whose bin/ lacks the bayestar-* scripts).
+            raise RuntimeError(
+                f"BAYESTAR tool not found in {self.bin_dir}: {exc}. Set bin_dir "
+                "to the directory holding the bayestar-* scripts."
+            ) from exc
         except (subprocess.CalledProcessError, KeyError, OSError):
             return None
         return out_path

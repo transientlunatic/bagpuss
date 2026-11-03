@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- The event blueprint's `trigger` includes the injected in-plane spins
+  (`spin1x`, `spin1y`, `spin2x`, `spin2y`), so that PE codes such as simple-pe
+  start from a precessing trigger.
+- `bagpuss.population_inference` and `bagpuss mdc fit-population`: recover the
+  mass and redshift hyperparameters of a release's detectable events with
+  `gwpopulation`, using the sensitivity injections for the selection effect
+  (new `population` extra). `InjectionDistribution.nuisance_log_prob` gives
+  the part of the draw density which is independent of masses and redshift.
+- `bagpuss.sensitivity`: sensitivity injections for the selection function
+  P(D|Lambda), after Essick et al. (2025, arXiv:2508.10638). A broad
+  `InjectionDistribution` (sampling and `log_prob`), a `SensitivityInjectionSet`
+  that keeps each injection's draw density and the total number drawn, and an
+  importance-sampling `detection_probability` that reports the Monte Carlo
+  uncertainty and `n_eff`. These differ from the event set, which is one
+  realisation of one population. See `docs/sensitivity.rst`.
+- MDC: an optional `sensitivity` config section and the
+  `generate-sensitivity` / `assemble-sensitivity` stages, with the same
+  duty-cycle schedule and SNR backend as the event set; `make-dag` renders
+  them (`--sensitivity-only` for an existing store); `export-release` writes
+  `sensitivity.h5` and `verify-release` checks it.
+- `PowerLawPlusPeakMassDistribution.log_prob`, the density samples are drawn
+  from, and `bagpuss.mdc.pipeline.build_population_log_prob` for the run's
+  true population.
+
+### Fixed
+- `BayestarLocalizer` raises when a `bayestar-*` executable is missing instead
+  of returning no skymap, which silently dropped every skymap of a detection
+  run in an overlay venv whose `bin/` lacks those scripts.
+
 ## 0.3.0
 
 Injection sets, and therefore MDC releases, produced by 0.2.0 are not

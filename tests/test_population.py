@@ -302,6 +302,49 @@ class TestPowerLawPlusPeakMassDistribution(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestPowerLawPlusPeakLogProb(unittest.TestCase):
+    """The density of PowerLawPlusPeakMassDistribution.log_prob."""
+
+    def _grid_integral(self, params: dict[str, float]) -> float:
+        """Integrate the density over m2 in [m_min, m1], then over m1."""
+        dist = PowerLawPlusPeakMassDistribution(**params)
+        n = 300
+        edges = np.linspace(params["m_min"], params["m_max"], n + 1)
+        m1_values = 0.5 * (edges[:-1] + edges[1:])
+        marginal = np.empty(n)
+        for i, m1 in enumerate(m1_values):
+            m2 = np.linspace(params["m_min"], m1, 1501)
+            density = np.exp(dist.log_prob(np.full_like(m2, m1), m2))
+            marginal[i] = np.sum(0.5 * (density[:-1] + density[1:]) * np.diff(m2))
+        return float(marginal.sum() * (edges[1] - edges[0]))
+
+    def test_integrates_to_one_without_smoothing(self) -> None:
+        """The density is normalised over the (m1, m2) triangle."""
+        self.assertAlmostEqual(self._grid_integral(_MASS_PARAMS), 1.0, delta=0.01)
+
+    def test_integrates_to_one_with_peak_and_smoothing(self) -> None:
+        """So is the full model, with a peak and the low-mass taper."""
+        self.assertAlmostEqual(self._grid_integral(_MASS_PARAMS_FULL), 1.0, delta=0.02)
+
+    def test_zero_outside_the_support(self) -> None:
+        """Unphysical or out-of-range masses have zero density."""
+        dist = PowerLawPlusPeakMassDistribution(**_MASS_PARAMS)
+        m1 = np.array([60.0, 20.0, 20.0, 4.0])
+        m2 = np.array([10.0, 25.0, 4.0, 3.0])
+        self.assertTrue(np.all(np.isneginf(dist.log_prob(m1, m2))))
+
+    def test_matches_the_distribution_samples_are_drawn_from(self) -> None:
+        """E_sample[p_ref / p] = 1 for a normalised reference density."""
+        dist = PowerLawPlusPeakMassDistribution(**_MASS_PARAMS_FULL)
+        m1, m2 = dist.sample(100_000, np.random.default_rng(0))
+        # Uniform density over the triangle m_min <= m2 <= m1 <= m_max.
+        span = _MASS_PARAMS_FULL["m_max"] - _MASS_PARAMS_FULL["m_min"]
+        ratio = (2.0 / span**2) / np.exp(dist.log_prob(m1, m2))
+        self.assertLess(
+            abs(ratio.mean() - 1.0), 4.0 * ratio.std() / np.sqrt(len(ratio))
+        )
+
+
 class TestIsotropicSpinDistribution(unittest.TestCase):
     """Tests for the isotropic spin distribution."""
 

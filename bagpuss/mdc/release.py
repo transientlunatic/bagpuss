@@ -13,6 +13,10 @@ directly, without knowing the shard layout:
     (network SNR, whether it was detectable, which detectors were observing,
     skymap) alongside. The ``/injections`` group is also readable by
     :meth:`bagpuss.injection.InjectionSet.from_hdf5`.
+``sensitivity.h5``
+    Only when the run has a sensitivity-injection campaign: the injections used
+    to estimate the selection function P(D|Lambda), with their draw
+    densities and SNRs (see :mod:`bagpuss.sensitivity`).
 ``events.yaml``
     The asimov event blueprints of the detectable events.
 ``skymaps.tar``
@@ -57,12 +61,19 @@ from bagpuss.mdc.config import MDCConfig
 from bagpuss.mdc.pipeline import (
     MDCValidationError,
     _open_store,
+    build_sensitivity_distribution,
     export_glade_catalogue,
 )
+from bagpuss.sensitivity import DENSITY_MEASURE, SensitivityInjectionSet
 
 __all__: list[str] = ["build_release", "verify_release"]
 
 _CHUNK_ROWS = 1_000_000
+
+#: Release names of the flat-ASCII catalogue (GLADE+ column layout, synthetic data).
+ASCII_CATALOGUE = "catalogue_ascii.dat.gz"
+ASCII_COMPLETENESS = "catalogue_ascii_completeness.dat"
+ASCII_README = "catalogue_ascii_README.txt"
 
 #: Upload metadata for the Zenodo deposit form or API. Not part of the payload
 #: (it is neither checksummed nor meant to be uploaded).
@@ -174,6 +185,62 @@ def _write_catalogue(config: MDCConfig, path: Path) -> dict[str, Any]:
         grp.attrs["m_lim"] = config.m_lim
         grp.attrs["z_max"] = config.z_max
     return {"n_galaxies": n, "n_tiles": len(index)}
+
+
+def _has_sensitivity(config: MDCConfig) -> bool:
+    """Return whether the store holds an assembled sensitivity campaign."""
+    root = _open_store(config, mode="r")
+    return (
+        "sensitivity" in root.group_keys()
+        and "_index" in root.require_group("sensitivity").attrs
+    )
+
+
+def _write_sensitivity(config: MDCConfig, path: Path) -> dict[str, Any]:
+    """Write ``sensitivity.h5`` and return its summary.
+
+    Pools the sensitivity shards. Injections with a network SNR below
+    ``config.sensitivity_min_snr`` are left out of the table, but still count in
+    its ``n_total`` attribute, so the selection function estimated from it is
+    unbiased for any threshold at or above ``min_snr``.
+    """
+    root = _open_store(config, mode="r")
+    group = root.require_group("sensitivity")
+    index = cast(list[dict[str, Any]], group.attrs["_index"])
+    shards: list[SensitivityInjectionSet] = []
+    snrs: list[np.ndarray] = []
+    actives: list[np.ndarray] = []
+    for row in index:
+        shard = group.require_group(f"shard_{row['shard_id']:04d}")
+        injections = SensitivityInjectionSet.from_zarr(shard)
+        keep = np.asarray(shard["network_snr"]) >= config.sensitivity_min_snr
+        shards.append(injections.select(keep))
+        snrs.append(np.asarray(shard["network_snr"])[keep])
+        actives.append(np.asarray(shard["active"])[keep])
+    pooled = SensitivityInjectionSet.concatenate(shards)
+    snr = np.concatenate(snrs)
+    detectable = snr >= config.snr_threshold
+
+    pooled.to_hdf5(path, network_snr=snr)
+    distribution = build_sensitivity_distribution(config)
+    with h5py.File(path, "a") as fh:
+        grp = cast(h5py.Group, fh["injections"])
+        grp.create_dataset("detectable", data=detectable)
+        active = grp.create_dataset("active", data=np.concatenate(actives))
+        active.attrs["detectors"] = list(config.detectors)
+        grp.attrs["snr_threshold"] = config.snr_threshold
+        grp.attrs["min_snr"] = config.sensitivity_min_snr
+        grp.attrs["cosmology"] = config.cosmology
+        for name in ("z_max", "m_min", "m_max", "alpha", "beta_q", "kappa"):
+            grp.attrs[name] = getattr(distribution, name)
+        grp.attrs["t_start"] = distribution.t_start
+        grp.attrs["t_end"] = distribution.t_end
+        grp.attrs["density_measure"] = DENSITY_MEASURE
+    return {
+        "n_total": pooled.n_total,
+        "n_stored": len(pooled),
+        "n_detected": int(detectable.sum()),
+    }
 
 
 def _load_injections(
@@ -321,6 +388,53 @@ def _write_events(
     return len(documents)
 
 
+def _sensitivity_readme(config: MDCConfig, counts: dict[str, Any]) -> str:
+    """Return the README section describing ``sensitivity.h5`` (or nothing)."""
+    if "n_sensitivity_total" not in counts:
+        return ""
+    return f"""
+## Sensitivity injections (`sensitivity.h5`, group `/injections`)
+
+For a hierarchical analysis the selection function P(D|Lambda), the probability
+that an event drawn from a population Lambda is detected, is needed at every
+Lambda the sampler visits. `injections.h5` cannot supply it: it is one
+realisation of one population. `sensitivity.h5` instead holds injections drawn
+from a fixed, deliberately broad distribution, so P(D|Lambda) follows by
+importance sampling for any population within its support (the method of
+Essick et al. 2025, arXiv:2508.10638).
+
+{counts["n_sensitivity_total"]:,} injections were drawn ({counts["n_sensitivity_detected"]:,}
+detected at network SNR >= {config.snr_threshold}). To save space the table keeps only
+those with SNR >= {config.sensitivity_min_snr} ({counts["n_sensitivity_stored"]:,}); **the
+number drawn is the group attribute `n_total` and must be used as the
+denominator.** Fields are those of `injections.h5` without the host index, plus
+`log_p_draw` (the log density each injection was drawn from, in the measure
+given by the attribute `density_measure`), `network_snr`, `detectable` and
+`active` (the detectors observing; the same duty-cycle schedule as the event
+set). The attributes record the support of the draw distribution
+(`z_max`, `m_min`, `m_max`, the primary-mass index `alpha`, the mass-ratio
+index `beta_q`, the redshift index `kappa`, `t_start`, `t_end`).
+
+The injections are drawn in source-frame redshift with `luminosity_distance`
+computed from the `{config.cosmology}` cosmology; to vary the cosmology, reweight
+by the Jacobian of (redshift, luminosity distance). A target population must be
+expressed as a density in the same variables.
+
+```python
+import numpy as np
+from bagpuss.sensitivity import SensitivityInjectionSet
+
+inj, snr = SensitivityInjectionSet.from_hdf5("sensitivity.h5", with_snr=True)
+# log_p_target: your population's log density at the injections (same measure)
+estimate = inj.detection_probability(log_p_target, snr, snr_threshold=8.0)
+print(estimate.value, estimate.std, estimate.n_eff, estimate.is_reliable(n_events=len(events)))
+```
+
+Check `n_eff` (the effective number of injections): it should exceed about four
+times the number of events in the analysis.
+"""  # noqa: E501
+
+
 def _readme(
     config: MDCConfig,
     title: str,
@@ -344,6 +458,19 @@ def _readme(
     )
     t0 = GPS_O3_START if config.t_start is None else config.t_start
     t1 = GPS_O3_END if config.t_end is None else config.t_end
+    sensitivity_row = (
+        f"| `sensitivity.h5` | {counts['n_sensitivity_total']:,} injections drawn from "
+        "a broad distribution, to estimate the selection function P(D|Lambda) |\n"
+        if "n_sensitivity_total" in counts
+        else ""
+    )
+    ascii_rows = (
+        f"| `{ASCII_CATALOGUE}`, `{ASCII_COMPLETENESS}`, `{ASCII_README}` | the same "
+        "galaxies as flat text, with the column layout of the GLADE+ catalogue "
+        "(**synthetic: not GLADE+**), and the exact completeness curve |\n"
+        if counts.get("ascii_catalogue")
+        else ""
+    )
     return f"""# {title}
 
 Version {version}. Generated with bagpuss {bagpuss.__version__}.
@@ -358,7 +485,7 @@ nothing here is real data.**
 |---|---|
 | `catalogue.h5` | {counts["n_galaxies"]:,} galaxies passing the survey selection (apparent magnitude < {config.m_lim}), one dataset per field |
 | `injections.h5` | all {counts["n_injections"]:,} simulated binary black hole mergers, with detection results |
-| `events.yaml` | asimov event blueprints for the {counts["n_detectable"]:,} detectable events (injection parameters, trigger, SNR) |
+{ascii_rows}{sensitivity_row}| `events.yaml` | asimov event blueprints for the {counts["n_detectable"]:,} detectable events (injection parameters, trigger, SNR) |
 | `skymaps.tar` | {counts["n_skymaps"]:,} BAYESTAR skymaps (`skymaps/<event name>.fits`) |
 | `config.yaml` | the configuration this run was generated from |
 | `SHA256SUMS`, `MANIFEST.json` | checksums and a machine-readable summary |
@@ -393,6 +520,7 @@ The observation window is GPS {t0} to {t1}; the merger rate density is
 {config.rate_density:g} Mpc^-3 yr^-1, held constant with redshift, out to
 z = {config.z_max}. The group is also readable with `bagpuss.injection.InjectionSet.from_hdf5`.
 
+{_sensitivity_readme(config, counts)}
 ## Events and skymaps
 
 `events.yaml` holds one asimov event blueprint per detectable event.
@@ -498,6 +626,10 @@ def build_release(
         config, names, detectable, skymap_files, out / "events.yaml"
     )
 
+    sensitivity_summary: dict[str, Any] | None = None
+    if _has_sensitivity(config):
+        sensitivity_summary = _write_sensitivity(config, out / "sensitivity.h5")
+
     if config_path is not None:
         text = Path(config_path).read_text()
     else:
@@ -505,16 +637,21 @@ def build_release(
     (out / "config.yaml").write_text(_portable_config(text))
 
     if glade:
-        glade_dir = out / "glade"
-        export_glade_catalogue(config, glade_dir)
+        # Named for what it is, not for GLADE+: it has that catalogue's column
+        # layout but is synthetic, and must not be mistaken for the real thing.
+        flat_dir = out / "flat"
+        export_glade_catalogue(config, flat_dir)
         with (
-            open(glade_dir / "catalogue.dat", "rb") as src,
-            gzip.open(out / "glade_catalogue.dat.gz", "wb") as dst,
+            open(flat_dir / "catalogue.dat", "rb") as src,
+            gzip.open(out / ASCII_CATALOGUE, "wb") as dst,
         ):
             shutil.copyfileobj(src, dst)
-        shutil.copy(glade_dir / "README.txt", out / "glade_README.txt")
-        shutil.copy(glade_dir / "completeness.dat", out / "glade_completeness.dat")
-        shutil.rmtree(glade_dir)
+        notes = (flat_dir / "README.txt").read_text()
+        notes = notes.replace("catalogue.dat", ASCII_CATALOGUE.removesuffix(".gz"))
+        notes = notes.replace("completeness.dat", ASCII_COMPLETENESS)
+        (out / ASCII_README).write_text(notes)
+        shutil.copy(flat_dir / "completeness.dat", out / ASCII_COMPLETENESS)
+        shutil.rmtree(flat_dir)
 
     counts = {
         "n_galaxies": catalogue_summary["n_galaxies"],
@@ -524,6 +661,12 @@ def build_release(
         "n_skymaps": int((skymap_files != "").sum()),
         "n_events": n_events,
     }
+    if glade:
+        counts["ascii_catalogue"] = True
+    if sensitivity_summary is not None:
+        counts["n_sensitivity_total"] = sensitivity_summary["n_total"]
+        counts["n_sensitivity_stored"] = sensitivity_summary["n_stored"]
+        counts["n_sensitivity_detected"] = sensitivity_summary["n_detected"]
     release_title = title or f"{name}: simulated galaxy catalogue and GW injections"
     (out / "README.md").write_text(_readme(config, release_title, version, counts))
 
@@ -551,6 +694,13 @@ def _write_zenodo_metadata(
         f"{counts['n_detectable']:,} are detectable, with {counts['n_skymaps']:,} "
         "BAYESTAR skymaps. See README.md for the file layout and field definitions.</p>"
     )
+    if "n_sensitivity_total" in counts:
+        description += (
+            f"<p>It also includes {counts['n_sensitivity_total']:,} sensitivity "
+            "injections, drawn from a broad distribution, from which the selection "
+            "function P(D|&Lambda;) can be estimated for any population in its "
+            "support.</p>"
+        )
     metadata = {
         "title": title,
         "upload_type": "dataset",
@@ -649,6 +799,39 @@ def _check_tables(
     return listed, detectable_names
 
 
+def _check_sensitivity(out: Path, counts: dict[str, Any], issues: list[str]) -> None:
+    """Check ``sensitivity.h5`` against the manifest and against itself."""
+    with h5py.File(out / "sensitivity.h5", "r") as fh:
+        grp = cast(h5py.Group, fh["injections"])
+        n_total = int(cast(int, grp.attrs["n_total"]))
+        n_rows = _dataset(fh, "injections/log_p_draw").shape[0]
+        if n_total != counts["n_sensitivity_total"]:
+            issues.append(
+                f"sensitivity.h5 has n_total {n_total}, "
+                f"manifest says {counts['n_sensitivity_total']}"
+            )
+        if n_rows != counts["n_sensitivity_stored"]:
+            issues.append(
+                f"sensitivity.h5 has {n_rows} rows, "
+                f"manifest says {counts['n_sensitivity_stored']}"
+            )
+        if n_rows > n_total:
+            issues.append("sensitivity.h5 holds more injections than were drawn")
+        if not np.all(np.isfinite(_dataset(fh, "injections/log_p_draw")[()])):
+            issues.append("sensitivity.h5 has non-finite draw densities")
+        snr = _dataset(fh, "injections/network_snr")[()]
+        threshold = float(cast(float, grp.attrs["snr_threshold"]))
+        min_snr = float(cast(float, grp.attrs["min_snr"]))
+        if snr.size and snr.min() < min_snr:
+            issues.append("sensitivity.h5 holds injections below its own min_snr")
+        if not np.array_equal(
+            _dataset(fh, "injections/detectable")[()], snr >= threshold
+        ):
+            issues.append("sensitivity.h5 detectable flags disagree with the SNRs")
+        if int((snr >= threshold).sum()) != counts["n_sensitivity_detected"]:
+            issues.append("sensitivity.h5 detected count disagrees with the manifest")
+
+
 def verify_release(out_dir: str | Path) -> dict[str, Any]:
     """Check a release directory against its own manifest.
 
@@ -695,6 +878,12 @@ def verify_release(out_dir: str | Path) -> dict[str, Any]:
         listed, detectable_names = _check_tables(out, counts, issues)
     except (OSError, KeyError) as exc:
         issues.append(f"cannot read the HDF5 tables: {exc}")
+
+    if "n_sensitivity_total" in counts:
+        try:
+            _check_sensitivity(out, counts, issues)
+        except (OSError, KeyError) as exc:
+            issues.append(f"cannot read sensitivity.h5: {exc}")
 
     try:
         with tarfile.open(out / "skymaps.tar") as tar:

@@ -45,6 +45,8 @@ __all__: list[str] = [
 ]
 
 _GRID_SIZE: int = 1_000
+#: Primary-mass nodes at which the mass-ratio normalisation is tabulated.
+_Q_NORM_NODES: int = 600
 
 #: Grid resolution used to numerically integrate/sample the rate-weighted
 #: redshift distribution (see :func:`expected_n_mergers` and
@@ -459,6 +461,56 @@ class PowerLawPlusPeakMassDistribution(MassDistribution):
         q = self._sample_q(m1, rng)
         m2 = m1 * q
         return m1, m2
+
+    def _q_norm(self, m1: np.ndarray) -> np.ndarray:
+        r"""Return :math:`\int q^{\beta_q} S(m_1 q)\,dq` over ``[m_min/m1, 1]``.
+
+        Evaluated on a grid of primary masses (the same grids as sampling) and
+        interpolated, since the normalisation depends on ``m1`` only.
+        """
+        if not hasattr(self, "_q_norm_table"):
+            # Dense near m_min, where the normalisation (suppressed by the
+            # low-mass taper) changes by orders of magnitude over a few Msun.
+            u = np.linspace(0.0, 1.0, _Q_NORM_NODES) ** 3
+            m1_nodes = self.m_min + (self.m_max - self.m_min) * np.maximum(u, 1e-9)
+            q_unit = np.linspace(0.0, 1.0, _GRID_SIZE)
+            table = np.empty(_Q_NORM_NODES)
+            for i, node in enumerate(m1_nodes):
+                q_lo = self.m_min / node
+                q = q_lo + (1.0 - q_lo) * q_unit
+                pdf = q**self.beta_q * _smoothing(node * q, self.m_min, self.delta_m)
+                table[i] = _trapezoid(pdf, q)
+            self._q_norm_nodes = m1_nodes
+            self._q_norm_table = np.log(np.maximum(table, 1e-300))
+        return np.asarray(np.exp(np.interp(m1, self._q_norm_nodes, self._q_norm_table)))
+
+    def log_prob(self, m1: np.ndarray, m2: np.ndarray) -> np.ndarray:
+        r"""Return the log density of ``(m1, m2)`` with respect to :math:`dm_1\,dm_2`.
+
+        The density is :math:`p(m_1)\,p(q|m_1)/m_1` with the normalisations used
+        by :meth:`sample` (the same grids), so it is the density samples are
+        drawn from. It is ``-inf`` outside the support.
+
+        Parameters
+        ----------
+        m1, m2 : numpy.ndarray
+            Source-frame component masses in :math:`M_\odot`.
+        """
+        m1 = np.asarray(m1, dtype=float)
+        m2 = np.asarray(m2, dtype=float)
+        inside = (m1 >= self.m_min) & (m1 <= self.m_max) & (m2 >= self.m_min)
+        inside &= m2 <= m1
+        m1s = np.where(inside, m1, 0.5 * (self.m_min + self.m_max))
+        m2s = np.where(inside, m2, self.m_min + 0.5 * (m1s - self.m_min))
+        q = m2s / m1s
+        p_m1 = self._m1_pdf(m1s) / _trapezoid(
+            self._m1_pdf(self._m1_grid), self._m1_grid
+        )
+        p_q = q**self.beta_q * _smoothing(m2s, self.m_min, self.delta_m)
+        p_q = p_q / np.maximum(self._q_norm(m1s), 1e-300)
+        with np.errstate(divide="ignore"):
+            log_p = np.log(p_m1 * p_q / m1s)
+        return np.where(inside, log_p, -np.inf)
 
 
 # ---------------------------------------------------------------------------

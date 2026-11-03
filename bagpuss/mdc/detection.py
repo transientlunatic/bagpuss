@@ -263,7 +263,8 @@ class MinkeBackend:
                 }
                 # The "trigger" PE codes such as simple-pe start from. There is
                 # no search in this MDC, so it is the injected truth (as in the
-                # earlier fake-transients dress rehearsal).
+                # earlier fake-transients dress rehearsal). The in-plane spins
+                # are included so that PE codes see a precessing trigger.
                 values = {
                     key: float(getattr(value, "value", value))
                     for key, value in event.items()
@@ -274,7 +275,11 @@ class MinkeBackend:
                 blueprint["trigger"] = {
                     "mass1": mass1,
                     "mass2": mass2,
+                    "spin1x": values["S1x"],
+                    "spin1y": values["S1y"],
                     "spin1z": values["S1z"],
+                    "spin2x": values["S2x"],
+                    "spin2y": values["S2y"],
                     "spin2z": values["S2z"],
                     "ra": values["ra"],
                     "dec": values["dec"],

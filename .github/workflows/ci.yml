@@ -50,6 +50,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - run: uv sync --extra dev
+      # the population extra, so that its imports resolve
+      - run: uv sync --extra dev --extra population
       - run: uv run mypy bagpuss/
       - run: uv run pyright
