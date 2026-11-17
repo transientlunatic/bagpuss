@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+- `load_simplepe_posteriors`, `load_release` and `bagpuss mdc fit-population`
+  take several SimplePE analyses in order of priority (`runs`, `simplepe_runs`,
+  `--simplepe-run`), and `simplepe_samples` reads the combined files'
+  `luminosity_distance` and `weights` columns as well as `distance` and `weight`,
+  so that the recalibrated posteriors of `bagpuss mdc recalibrate-posteriors`
+  can be used for population inference.
+
 ### Added
 - `bagpuss mdc recalibrate-posteriors` and `bagpuss.mdc.recalibration`: fit one
   shift and one width factor in ln D_L which calibrate the SimplePE distance

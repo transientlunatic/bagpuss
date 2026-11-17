@@ -466,7 +466,8 @@ def simplepe_samples(
 
     The file is ``posterior_samples.dat``: detector-frame ``chirp_mass``,
     ``symmetric_mass_ratio`` and ``distance`` with an importance ``weight``.
-    ``SimplePE`` with its defaults (reweighting to uniform detector-frame
+    The combined file's ``luminosity_distance`` and ``weights`` are accepted
+    too. ``SimplePE`` with its defaults (reweighting to uniform detector-frame
     component masses and isotropic spins, and ``--distance_prior
     UniformVolume``) has the prior
 
@@ -502,10 +503,15 @@ def simplepe_samples(
     import pandas as pd
 
     data = np.genfromtxt(path, names=True)
+    names = data.dtype.names or ()
+    # the per-branch files call these columns distance and weight, the combined
+    # file (and the recalibrated one) luminosity_distance and weights
+    d_name = "distance" if "distance" in names else "luminosity_distance"
+    w_name = "weight" if "weight" in names else "weights"
     chirp = np.asarray(data["chirp_mass"], dtype=float)
     eta = np.asarray(data["symmetric_mass_ratio"], dtype=float)
-    d_l = np.asarray(data["distance"], dtype=float)
-    weight = np.asarray(data["weight"], dtype=float)
+    d_l = np.asarray(data[d_name], dtype=float)
+    weight = np.asarray(data[w_name], dtype=float)
     weight = weight / weight.mean()
 
     z_grid = np.linspace(0.0, 6.0, 6001)
@@ -535,11 +541,16 @@ def simplepe_samples(
     return frame.iloc[keep].reset_index(drop=True)
 
 
+def _has_posterior(path: Path) -> bool:
+    return path.exists() and path.stat().st_size > 0
+
+
 def load_simplepe_posteriors(
     release_dir: str | Path,
     working_dir: str | Path,
     cosmology: FLRW,
     n_samples: int | None = 600,
+    runs: Sequence[str] = ("simplepe-xhm",),
 ) -> tuple[list[pd.DataFrame], list[str], list[str]]:
     """Read the ``SimplePE`` posteriors of a release's detectable events.
 
@@ -549,11 +560,15 @@ def load_simplepe_posteriors(
         The release; its ``injections.h5`` names the detectable events.
     working_dir : str or pathlib.Path
         The asimov project's ``working`` directory, holding
-        ``<event>/simplepe-xhm/output/posterior_samples.dat``.
+        ``<event>/<run>/output/posterior_samples.dat`` (also the layout written
+        by ``bagpuss mdc recalibrate-posteriors``).
     cosmology : astropy.cosmology.FLRW
         See :func:`simplepe_samples`.
     n_samples : int or None, optional
         Samples per event (see :func:`simplepe_samples`).
+    runs : sequence of str, optional
+        The analyses to read, in order of priority: an event takes the first
+        which has a (non-empty) combined posterior.
 
     Returns
     -------
@@ -572,9 +587,12 @@ def load_simplepe_posteriors(
     found_names: list[str] = []
     missing: list[str] = []
     for index, name in enumerate(names):
-        path = Path(working_dir) / name / "simplepe-xhm" / "output"
-        path = path / "posterior_samples.dat"
-        if path.exists():
+        paths = [
+            Path(working_dir) / name / run / "output" / "posterior_samples.dat"
+            for run in runs
+        ]
+        path = next((p for p in paths if _has_posterior(p)), None)
+        if path is not None:
             found.append(simplepe_samples(path, cosmology, n_samples, seed=index))
             found_names.append(name)
         else:
@@ -586,6 +604,7 @@ def load_release(
     release_dir: str | Path,
     config: MDCConfig | None = None,
     simplepe_dir: str | Path | None = None,
+    simplepe_runs: Sequence[str] = ("simplepe-xhm",),
 ) -> ReleaseInputs:
     """Read a data release into the inputs of :func:`fit_population`.
 
@@ -607,6 +626,8 @@ def load_release(
         An asimov project's ``working`` directory. If given, the events are the
         ``SimplePE`` posteriors found there (see
         :func:`load_simplepe_posteriors`) rather than the true parameters.
+    simplepe_runs : sequence of str, optional
+        The analyses to read there, in order of priority.
 
     Raises
     ------
@@ -669,7 +690,10 @@ def load_release(
             ]
     else:
         posteriors, names, missing = load_simplepe_posteriors(
-            root, simplepe_dir, _load_cosmology(config.cosmology)
+            root,
+            simplepe_dir,
+            _load_cosmology(config.cosmology),
+            runs=simplepe_runs,
         )
     return ReleaseInputs(
         posteriors=posteriors,

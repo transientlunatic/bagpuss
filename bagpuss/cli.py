@@ -692,6 +692,17 @@ def mdc_verify_release(release_dir: Path) -> None:
     ),
 )
 @click.option(
+    "--simplepe-run",
+    "simplepe_runs",
+    multiple=True,
+    default=("simplepe-xhm",),
+    show_default=True,
+    help=(
+        "SimplePE analyses to read in --simplepe-dir, in order of priority: an "
+        "event takes the first with a combined posterior. Repeat for several."
+    ),
+)
+@click.option(
     "--drop-unsupported",
     is_flag=True,
     help=(
@@ -720,6 +731,7 @@ def mdc_fit_population(  # noqa: PLR0913
     out_dir: Path,
     free: str,
     simplepe_dir: Path | None,
+    simplepe_runs: tuple[str, ...],
     drop_unsupported: bool,
     nlive: int,
     mass_grid: str,
@@ -744,7 +756,9 @@ def mdc_fit_population(  # noqa: PLR0913
         unsupported_events,
     )
 
-    inputs = load_release(release_dir, simplepe_dir=simplepe_dir)
+    inputs = load_release(
+        release_dir, simplepe_dir=simplepe_dir, simplepe_runs=simplepe_runs
+    )
     if inputs.missing_events:
         click.echo(
             f"{len(inputs.missing_events)} detectable events have no posterior "

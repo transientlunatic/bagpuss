@@ -13,6 +13,7 @@ from bagpuss.population import PowerLawPlusPeakMassDistribution
 from bagpuss.population_inference import (
     event_samples,
     load_release,
+    load_simplepe_posteriors,
     selection_data,
     simplepe_samples,
     summarise,
@@ -137,6 +138,114 @@ class TestSimplePESamples(unittest.TestCase):
             df = simplepe_samples(path, Planck18, n_samples=None)
         self.assertAlmostEqual(float(df.prior[0] / df.prior[1]), 2.0)
         self.assertAlmostEqual(float(df.mass_ratio[0]), 0.75)
+
+
+@unittest.skipUnless(importlib.util.find_spec("pandas"), "pandas is not installed")
+class TestSimplePEColumnsAndRuns(unittest.TestCase):
+    """The combined files' column names, and falling back between analyses."""
+
+    @staticmethod
+    def _write(path: Path, header: str, rng: np.random.Generator) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        n = 50
+        m1d = rng.uniform(30, 40, n)
+        m2d = rng.uniform(20, 30, n)
+        total = m1d + m2d
+        eta = m1d * m2d / total**2
+        columns = {
+            "chirp_mass": total * eta**0.6,
+            "symmetric_mass_ratio": eta,
+            "distance": rng.uniform(500, 1500, n),
+            "luminosity_distance": None,
+            "weight": rng.uniform(0.5, 1.5, n),
+            "weights": None,
+        }
+        names = header.split()
+        data = [columns[n_] if columns[n_] is not None else None for n_ in names]
+        distance, weight = columns["distance"], columns["weight"]
+        data = [
+            distance
+            if n_ in ("distance", "luminosity_distance")
+            else weight
+            if n_ in ("weight", "weights")
+            else columns[n_]
+            for n_ in names
+        ]
+        np.savetxt(path, np.column_stack(data), header=header, comments="")
+
+    def test_combined_file_names(self) -> None:
+        """luminosity_distance and weights are read like distance and weight."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new = Path(tmp) / "old.dat", Path(tmp) / "new.dat"
+            self._write(
+                old,
+                "chirp_mass symmetric_mass_ratio distance weight",
+                np.random.default_rng(0),
+            )
+            self._write(
+                new,
+                "chirp_mass symmetric_mass_ratio luminosity_distance weights",
+                np.random.default_rng(0),
+            )
+            a = simplepe_samples(old, Planck18, n_samples=None)
+            b = simplepe_samples(new, Planck18, n_samples=None)
+        np.testing.assert_allclose(a["prior"], b["prior"])
+        np.testing.assert_allclose(a["redshift"], b["redshift"])
+
+    def test_runs_in_priority_order(self) -> None:
+        """An event takes the first run with a posterior; the rest are missing."""
+        header = "chirp_mass symmetric_mass_ratio luminosity_distance weights"
+        rng = np.random.default_rng(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release = root / "release"
+            release.mkdir()
+            names = ["inj_1.0", "inj_2.0", "inj_3.0", "inj_4.0"]
+            with h5py.File(release / "injections.h5", "w") as fh:
+                grp = fh.create_group("injections")
+                grp["event_name"] = np.array(names + ["inj_9.0"], dtype="S")
+                grp["detectable"] = np.array([True] * 4 + [False])
+            work = root / "work"
+            for name, run in (("inj_1.0", "a"), ("inj_2.0", "b"), ("inj_1.0", "b")):
+                self._write(
+                    work / name / run / "output" / "posterior_samples.dat", header, rng
+                )
+            # an empty file does not count as a posterior
+            empty = work / "inj_3.0" / "a" / "output" / "posterior_samples.dat"
+            empty.parent.mkdir(parents=True)
+            empty.write_text("")
+            posteriors, found, missing = load_simplepe_posteriors(
+                release, work, Planck18, n_samples=10, runs=("a", "b")
+            )
+        self.assertEqual(found, ["inj_1.0", "inj_2.0"])
+        self.assertEqual(missing, ["inj_3.0", "inj_4.0"])
+        self.assertEqual(len(posteriors), 2)
+
+    def test_default_run_is_unchanged(self) -> None:
+        """Without runs, the old simplepe-xhm directory is read."""
+        header = "chirp_mass symmetric_mass_ratio distance weight"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release = root / "release"
+            release.mkdir()
+            with h5py.File(release / "injections.h5", "w") as fh:
+                grp = fh.create_group("injections")
+                grp["event_name"] = np.array(["inj_1.0"], dtype="S")
+                grp["detectable"] = np.array([True])
+            self._write(
+                root
+                / "work"
+                / "inj_1.0"
+                / "simplepe-xhm"
+                / "output"
+                / "posterior_samples.dat",
+                header,
+                np.random.default_rng(2),
+            )
+            _, found, missing = load_simplepe_posteriors(
+                release, root / "work", Planck18, n_samples=5
+            )
+        self.assertEqual((found, missing), (["inj_1.0"], []))
 
 
 class TestSelectionData(unittest.TestCase):
