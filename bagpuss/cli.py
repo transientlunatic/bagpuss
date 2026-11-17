@@ -574,6 +574,85 @@ def mdc_export_release(  # noqa: PLR0913
         raise SystemExit(1)
 
 
+@mdc.command("recalibrate-posteriors")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("working_dir", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--run",
+    "runs",
+    multiple=True,
+    default=("simplepe-IMRPhenomXPHM", "simplepe-IMRPhenomXPHM-nochip2"),
+    show_default=True,
+    help=(
+        "SimplePE analyses in the asimov working directory, in order of priority: "
+        "an event takes the first with a combined posterior, and each is "
+        "recalibrated with its own fit. Repeat for several."
+    ),
+)
+@click.option(
+    "--out-dir",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Where to write the recalibrated posteriors (must be empty or absent).",
+)
+@click.option(
+    "--prior-power",
+    type=float,
+    default=2.0,
+    show_default=True,
+    help="The analysis distance prior is proportional to D**p (2: uniform volume).",
+)
+def mdc_recalibrate_posteriors(
+    source: Path,
+    working_dir: Path,
+    runs: tuple[str, ...],
+    out_dir: Path,
+    prior_power: float,
+) -> None:
+    """Recalibrate the distance posteriors of SimplePE against the injected values.
+
+    For each analysis in --run, fits one shift and one width factor in ln D_L
+    over the detectable events which take their posterior from it, in the
+    asimov project working directory WORKING_DIR. SOURCE gives the events and
+    their true distances: a release directory, or a blueprints file, and writes the
+    corrected posteriors with the same layout. recalibration.json holds the
+    fits, their calibration and a split validation, and missing_events.txt
+    lists the detectable events which have no combined posterior yet.
+    """
+    from bagpuss.mdc.recalibration import (
+        blueprint_truths,
+        recalibrate_catalogue,
+        release_truths,
+    )
+
+    truths = release_truths(source) if source.is_dir() else blueprint_truths(source)
+
+    record = recalibrate_catalogue(working_dir, out_dir, runs, truths, prior_power)
+    if not record["events"]:
+        raise click.ClickException(
+            f"no posteriors of {', '.join(runs)} in {working_dir}"
+        )
+    for run, group in record["groups"].items():
+        before, after = group["before"], group["after"]
+        click.echo(
+            f"{run}: {group['events']} events, shift {group['shift']:.3f}, "
+            f"scale {group['scale']:.3f}; central-90% coverage "
+            f"{before['coverage_90']:.1%} -> {after['coverage_90']:.1%}, "
+            f"z spread {before['std_z']:.2f} -> {after['std_z']:.2f}"
+        )
+        if "validation" in group:
+            v = group["validation"]
+            click.echo(
+                f"  held out: coverage {v['coverage_90']:.1%}, z spread "
+                f"{v['std_z']:.2f}, shift {v['shift_mean']:.3f}+-{v['shift_std']:.3f}, "
+                f"scale {v['scale_mean']:.3f}+-{v['scale_std']:.3f}"
+            )
+    click.echo(
+        f"wrote {record['events']} posteriors to {out_dir}; "
+        f"{record['missing']} events still need a posterior (missing_events.txt)"
+    )
+
+
 @mdc.command("verify-release")
 @click.argument("release_dir", type=click.Path(exists=True, path_type=Path))
 def mdc_verify_release(release_dir: Path) -> None:
