@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+- `bagpuss mdc recalibrate-posteriors` and `bagpuss.mdc.recalibration`: fit one
+  shift and one width factor in ln D_L which calibrate the SimplePE distance
+  posteriors against the injected distances, and write corrected posteriors
+  (samples moved, weights multiplied by the prior ratio, so that the prior
+  assumed by `simplepe_samples` still holds) with the fit and its diagnostics.
+  Several analyses can be given in order of priority; each is fitted
+  separately (with a held-out split validation), and `missing_events.txt` lists
+  the events which have no combined posterior yet.
 - The event blueprint's `trigger` includes the injected in-plane spins
   (`spin1x`, `spin1y`, `spin2x`, `spin2y`), so that PE codes such as simple-pe
   start from a precessing trigger.
